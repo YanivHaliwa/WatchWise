@@ -230,6 +230,19 @@ Clear the cache when needed:
 python WatchSearch.py --clear-cache
 ```
 
+### Watched Titles Cache (Persistent)
+
+Your Trakt.tv watch history is saved to `.watched_cache.json` in the project directory.
+
+- First run with `-n`: fetches from Trakt API (~25s), saves to disk
+- Subsequent runs: loads from disk instantly (near 0s)
+- Cache auto-refreshes after **24 hours**
+- Force a refresh manually:
+
+```bash
+python watched.py -r
+```
+
 ### TMDB Search Cache (In-Memory)
 
 TMDB search results are cached in memory for the duration of the session.

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import json
+import time
 import requests
 import argparse
 import sys
@@ -9,16 +11,36 @@ DEBUG = False
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GET_TRAKT_SCRIPT = os.path.join(SCRIPT_DIR, "getTrakt.sh")
+_WATCHED_CACHE_FILE = os.path.join(SCRIPT_DIR, ".watched_cache.json")
+_CACHE_TTL = 24 * 3600  # 24 hours
+
+def _load_watched_cache() -> set:
+    """Load watched titles from disk cache if it exists and is fresh."""
+    try:
+        with open(_WATCHED_CACHE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and 'titles' in data and 'ts' in data:
+            if time.time() - data['ts'] < _CACHE_TTL:
+                return set(data['titles'])
+    except Exception:
+        pass
+    return set()
+
+def _save_watched_cache(titles: set) -> None:
+    """Persist watched titles to disk cache with current timestamp."""
+    try:
+        with open(_WATCHED_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'ts': time.time(), 'titles': list(titles)}, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 def refresh_tokens():
     """Run getTrakt.sh interactively, then read updated tokens from .zshrc."""
     print("🔄 Access token expired. Re-authenticating with Trakt...")
-    # Run interactively so user can complete the device code flow
     result = subprocess.run(["bash", GET_TRAKT_SCRIPT])
     if result.returncode != 0:
         print("❌ Failed to refresh tokens.")
         sys.exit(1)
-    # Read updated tokens from .zshrc
     zshrc = os.path.expanduser("~/.zshrc")
     with open(zshrc) as f:
         for line in f:
@@ -47,8 +69,8 @@ def make_request(url, retried=False):
         return make_request(url, retried=True)
     return response
 
-def get_all_watched_titles():
-    """Get all watched movie and show titles from Trakt.tv history"""
+def _fetch_from_trakt() -> set:
+    """Fetch all watched titles from Trakt API."""
     titles = set()
     page = 1
     per_page = 100
@@ -77,9 +99,25 @@ def get_all_watched_titles():
 
     return titles
 
-def print_all_history():
-    """Print all watched titles alphabetically"""
-    titles = get_all_watched_titles()
+def get_all_watched_titles(force_refresh: bool = False) -> set:
+    """Get all watched titles — from disk cache if fresh, else fetch from Trakt."""
+    if not force_refresh:
+        cached = _load_watched_cache()
+        if cached:
+            if DEBUG:
+                print(f"✅ Loaded {len(cached)} watched titles from cache")
+            return cached
+
+    titles = _fetch_from_trakt()
+    if titles:
+        _save_watched_cache(titles)
+        if DEBUG:
+            print(f"💾 Saved {len(titles)} watched titles to cache")
+    return titles
+
+def print_all_history(force_refresh: bool = False):
+    """Print all watched titles alphabetically."""
+    titles = get_all_watched_titles(force_refresh=force_refresh)
 
     print("\n🎬 Watched (Movies & Series):")
     for title in sorted(titles):
@@ -87,9 +125,9 @@ def print_all_history():
 
     return titles
 
-def check_if_watched(query):
-    """Check if a specific title has been watched"""
-    titles = get_all_watched_titles()
+def check_if_watched(query, force_refresh: bool = False):
+    """Check if a specific title has been watched."""
+    titles = get_all_watched_titles(force_refresh=force_refresh)
 
     query_lower = query.lower()
     matches = [title for title in titles if query_lower in title.lower()]
@@ -117,6 +155,8 @@ def main():
                         help="Show all watched movies and series")
     parser.add_argument("-q", "--query", type=str,
                         help="Query if a specific title has been watched")
+    parser.add_argument("-r", "--refresh", action="store_true",
+                        help="Force refresh from Trakt (ignore cache)")
     parser.add_argument("-d", "--debug", action="store_true",
                         help="Enable debug output")
 
@@ -133,9 +173,9 @@ def main():
         sys.exit(1)
 
     if args.query:
-        return check_if_watched(args.query)
+        return check_if_watched(args.query, force_refresh=args.refresh)
     else:
-        print_all_history()
+        print_all_history(force_refresh=args.refresh)
         return True
 
 if __name__ == "__main__":

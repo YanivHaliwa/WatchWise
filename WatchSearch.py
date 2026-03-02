@@ -5,6 +5,7 @@ import os
 import argparse
 
 import subprocess
+import time as _startup_timer
 
 # Import the watched script functionality
 try:
@@ -153,7 +154,6 @@ def _parallel_translate_terminal(items: list, max_workers: int = 40) -> None:
     """Parallel-translate title/overview/genres in place for terminal display."""
     if not items:
         return
-    from concurrent.futures import ThreadPoolExecutor as _TPE
     flat: list = []
     fmap: list = []
     for idx, item in enumerate(items):
@@ -161,9 +161,7 @@ def _parallel_translate_terminal(items: list, max_workers: int = 40) -> None:
         flat.append(item.get('overview', ''));         fmap.append((idx, 'overview', None))
         for gi, g in enumerate(item.get('genres', [])):
             flat.append(g);                            fmap.append((idx, 'genre', gi))
-    workers = min(max_workers, max(len(flat), 1))
-    with _TPE(max_workers=workers) as ex:
-        translated = list(ex.map(translate_he, flat))
+    translated, _, _ = translate_batch_he(flat)
     for (idx, field, gi), tr in zip(fmap, translated):
         item = items[idx]
         if field == 'title':
@@ -336,22 +334,29 @@ query = args.query
 web_movie_items = []
 web_tv_items = []
 
-# Load watched titles if using --not-watched flag
-watched_titles = set()
+# Load watched titles in background thread (parallel with TMDB search, same as web mode)
+watched_titles_lower: set = set()
 _nw_load_secs: float = 0.0
+_nw_event = None
+_nw_container: list = []
+
 if args.not_watched and get_all_watched_titles is not None:
-    _nw_t0 = _startup_timer.time()
-    try:
-        watched_titles = get_all_watched_titles()
-        # Convert all titles to lowercase for case-insensitive comparison
-        watched_titles_lower = {title.lower() for title in watched_titles}
-        if DEBUG:
-            print(f"Loaded {len(watched_titles)} watched titles for filtering")
-    except Exception as e:
-        print(f"{Colors.RED}Error loading watched titles: {e}{Colors.END}")
-        print("Continuing without watched filtering")
-        args.not_watched = False  # Disable filtering
-    _nw_load_secs = round(_startup_timer.time() - _nw_t0, 3)
+    import threading as _nw_thread_mod
+    _nw_event = _nw_thread_mod.Event()
+
+    def _load_nw_bg():
+        try:
+            ws = get_all_watched_titles()
+            _nw_container.append({t.lower() for t in ws})
+            if DEBUG:
+                print(f"Loaded {len(ws)} watched titles for filtering")
+        except Exception as e:
+            print(f"{Colors.RED}Error loading watched titles: {e}{Colors.END}")
+            print("Continuing without watched filtering")
+            _nw_container.append(set())
+        _nw_event.set()
+
+    _nw_thread_mod.Thread(target=_load_nw_bg, daemon=True).start()
 
 tmdb = TMDb()
 tmdb.api_key = os.getenv("TMDB_API_KEY")
@@ -378,7 +383,6 @@ tv = TV()
 genre = Genre()
 
 # Get genre lists for movies and TV shows once to use for lookups
-import time as _startup_timer
 import threading as _genres_thread_mod
 
 movie_genres: dict = {}
@@ -2192,9 +2196,7 @@ _perf['start'] = _perf_time.time()
 if not _interactive_blank and '_tmdb_genre_load_secs' in dir():
     _perf['TMDB genre load'] = _tmdb_genre_load_secs  # type: ignore[name-defined]
     # _last stays at start — genre load happened before this block, don't skew subsequent deltas
-# Capture unwatched titles load time (also measured before _perf was initialized)
-if _nw_load_secs > 0:
-    _perf['unwatched load'] = _nw_load_secs
+# unwatched load time recorded after background thread wait (see below)
 
 def _tick(label: str) -> None:
     """Record elapsed time since last _tick (or start) under label."""
@@ -2291,6 +2293,15 @@ if not args.series_only and not (args.interactive and not args.query and not arg
     if DEBUG:
         print(f"Found {len(movie_results)} movie results by title and {len(getattr(locals(), 'desc_movie_results', []))} by description")
         print(f"Total unique movies: {len(movie_combined)}")
+
+    # Wait for background watched-titles load (ran in parallel with TMDB search)
+    if args.not_watched and _nw_event is not None and not args.web:
+        _nw_t0_wait = _startup_timer.time()
+        _nw_event.wait()
+        watched_titles_lower = _nw_container[0] if _nw_container else set()
+        _nw_load_secs = round(_startup_timer.time() - _nw_t0_wait, 3)
+        if _nw_load_secs > 0.001:
+            _perf['unwatched wait'] = _nw_load_secs
 
     # Pass 1: collect all filtered items (no translation yet)
     displayed_count = 0
