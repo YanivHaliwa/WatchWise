@@ -263,7 +263,7 @@ def parse_arguments():
 
     parser.add_argument("-t", "--translate",
                         action="store_true",
-                        help="Translate descriptions and genres to Hebrew using Cohere")
+                        help="Translate descriptions and genres to Hebrew using GoogleTranslator")
 
     parser.add_argument("--debug",
                         action="store_true",
