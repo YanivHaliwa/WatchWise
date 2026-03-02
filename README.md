@@ -23,6 +23,12 @@ A set of CLI tools to search for movies and TV shows with optional filtering bas
 - 📊 **Relevance Scoring**: Results ranked by how closely they match your query
 - 🔜 **Coming Soon Badges**: Upcoming releases are automatically labeled in web view
 
+
+## Screenshots
+
+![WatchWise Demo](screenshots/demo.gif)
+
+
 ## Installation
 
 ### Prerequisites
@@ -151,12 +157,6 @@ Enable debug output:
 ```bash
 python WatchSearch.py --debug "Matrix"
 ```
-
-screenshots:
-
-![Movie Search Demo](screenshots/filter-watched-result-desc.png "filter number of result and description and not watched")
-![Movie Search Demo](screenshots/filter-result-and-desc.png "filter number of result and description")
-![Movie Search Demo](screenshots/search-5-result.png "filter number of result")
 
 ### Check Watch History
 
