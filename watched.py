@@ -12,7 +12,7 @@ DEBUG = False
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 GET_TRAKT_SCRIPT = os.path.join(SCRIPT_DIR, "getTrakt.sh")
 _WATCHED_CACHE_FILE = os.path.join(SCRIPT_DIR, ".watched_cache.json")
-_CACHE_TTL = 24 * 3600  # 24 hours
+_CACHE_TTL = 30 * 24 * 3600  # 30 days
 
 def _load_watched_cache() -> set:
     """Load watched titles from disk cache if it exists and is fresh."""

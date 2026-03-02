@@ -236,7 +236,7 @@ Your Trakt.tv watch history is saved to `.watched_cache.json` in the project dir
 
 - First run with `-n`: fetches from Trakt API (~25s), saves to disk
 - Subsequent runs: loads from disk instantly (near 0s)
-- Cache auto-refreshes after **24 hours**
+- Cache auto-refreshes after **30 days**
 - Force a refresh manually:
 
 ```bash
