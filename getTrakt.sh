@@ -37,10 +37,14 @@ while true; do
     access_token=$(echo "$token_response" | jq -r .access_token)
     refresh_token=$(echo "$token_response" | jq -r .refresh_token)
 
-    echo "export TRAKT_ACCESS_TOKEN=\"$access_token\""  
-    echo "export TRAKT_REFRESH_TOKEN=\"$refresh_token\""  
-    
-    echo "Add those lines to your .bashrc or .zshrc file to set the tokens as environment variables."
+    ZSHRC="$HOME/.zshrc"
+    sed -i "s|^export TRAKT_ACCESS_TOKEN=.*|export TRAKT_ACCESS_TOKEN=\"$access_token\"|" "$ZSHRC"
+    sed -i "s|^export TRAKT_REFRESH_TOKEN=.*|export TRAKT_REFRESH_TOKEN=\"$refresh_token\"|" "$ZSHRC"
+
+    export TRAKT_ACCESS_TOKEN="$access_token"
+    export TRAKT_REFRESH_TOKEN="$refresh_token"
+
+    echo "✅ Tokens updated in $ZSHRC and exported to current shell"
     break
   elif echo "$token_response" | grep -q "authorization_pending"; then
     sleep "$interval"

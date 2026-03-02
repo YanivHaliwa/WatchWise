@@ -11,9 +11,17 @@ A set of CLI tools to search for movies and TV shows with optional filtering bas
 - 📺 **Detailed Information**: View release dates, genres, and descriptions
 - 🎬 **Filter by Type**: Search for movies only or TV shows only
 - ⌛ **Filter by Year**: Find content from a specific release year
+- 🎭 **Filter by Genre**: Browse or search by one or multiple genres (query optional)
+- 🌍 **Filter by Language**: Show only content in specific original languages
 - ✅ **Watch History Integration**: Filter out content you've already watched
 - 🔎 **Description Search**: Find media that matches keywords in descriptions
-- 🎭 **Genre Highlighting**: Visual display of genres for better categorization
+- 🏷️ **Genre & Language Badges**: Visual display of genres and original language for each result
+- 🌐 **Hebrew Translation**: Translate titles, descriptions, and genres to Hebrew via `deep_translator` (GoogleTranslator) with persistent disk cache — already-translated strings are served instantly without any network call
+- ⚡ **Smart Caching**: Persistent translation cache on disk + in-memory TMDB search cache per session to avoid redundant API calls
+- 🖥️ **Web View**: Display results as a styled dark-theme HTML page opened in Firefox
+- ⚡ **Interactive Mode**: Full in-browser SPA with live filters for type, year, genre, language, and watched status (requires web mode)
+- 📊 **Relevance Scoring**: Results ranked by how closely they match your query
+- 🔜 **Coming Soon Badges**: Upcoming releases are automatically labeled in web view
 
 ## Installation
 
@@ -22,6 +30,7 @@ A set of CLI tools to search for movies and TV shows with optional filtering bas
 - Python 3.6+
 - [TMDb API Key](https://www.themoviedb.org/settings/api)
 - [Trakt.tv API Access](https://trakt.tv/oauth/applications) (optional, for watch history)
+- `jq` (required for `getTrakt.sh`): `apt install jq`
 
 ### Setup
 
@@ -39,7 +48,7 @@ A set of CLI tools to search for movies and TV shows with optional filtering bas
 3. Set up your TMDb API Key:
 
    ```bash
-   export TMDB_API_KEY="your_tmdb_api_key"   
+   export TMDB_API_KEY="your_tmdb_api_key"
    ```
 4. (Optional) Set up Trakt.tv integration:
 
@@ -49,20 +58,7 @@ A set of CLI tools to search for movies and TV shows with optional filtering bas
    ./getTrakt.sh
    ```
 
-   Outputs:
-
-   ```bash
-   TRAKT_ACCESS_TOKEN="xyz"   
-   TRAKT_REFRESH_TOKEN="xyz"   
-   ```
-
-   set up your TRAKT TOKEN:
-
-   ```bash
-   export TRAKT_ACCESS_TOKEN="your_trakt_access_token"
-   ```
-
-   Follow the instructions to authorize the application and set the required environment variables.
+   The script will prompt you to authorize the app, then **automatically save the tokens to `~/.zshrc`** and export them to the current shell. No manual export needed.
 
 ## Usage
 
@@ -92,6 +88,20 @@ Filter by year:
 python WatchSearch.py -y 2022 "Top Gun"
 ```
 
+Filter by genre (query is optional — browse without a search term):
+
+```bash
+python WatchSearch.py -g Action "Marvel"
+python WatchSearch.py -g Action Comedy -y 2023   # browse by genre + year, no query needed
+```
+
+Filter by original language:
+
+```bash
+python WatchSearch.py --lang Korean
+python WatchSearch.py --lang Korean Japanese "thriller"
+```
+
 Filter out already watched content:
 
 ```bash
@@ -109,6 +119,31 @@ Control description length:
 ```bash
 python WatchSearch.py -d 200 "Inception"  # Show 200 characters
 python WatchSearch.py -d 0 "Inception"    # Show full descriptions
+```
+
+Translate results to Hebrew:
+
+```bash
+python WatchSearch.py -t "Inception"
+```
+
+Open results in a styled web page:
+
+```bash
+python WatchSearch.py -w "Inception"
+```
+
+Open interactive browser UI (live filters, no page reload):
+
+```bash
+python WatchSearch.py -w -i "Inception"
+python WatchSearch.py -w -i              # launch blank interactive mode
+```
+
+Clear the persistent translation cache:
+
+```bash
+python WatchSearch.py --clear-cache
 ```
 
 Enable debug output:
@@ -137,6 +172,12 @@ Check if a specific title has been watched:
 python watched.py -q "Breaking Bad"
 ```
 
+Enable debug output:
+
+```bash
+python watched.py -d
+```
+
 ## API Keys and Configuration
 
 The application uses environment variables for configuration:
@@ -144,13 +185,13 @@ The application uses environment variables for configuration:
 ### Required Environment Variables
 
 - `TMDB_API_KEY`: Your TMDb API key (required for movie/show search)
-- `TRAKT_CLIENT_ID`: Your Trakt.tv client ID (required for watch history)
-- `TRAKT_CLIENT_SECRET`: Your Trakt.tv client secret (required for token generation)
-- `TRAKT_ACCESS_TOKEN`: Your Trakt.tv access token (required for watch history)
 
 ### Optional Environment Variables
 
-- `TRAKT_REFRESH_TOKEN`: Generated when running getTrakt.sh (for future token refresh)
+- `TRAKT_CLIENT_ID`: Your Trakt.tv client ID (required for watch history)
+- `TRAKT_CLIENT_SECRET`: Your Trakt.tv client secret (required for token generation)
+- `TRAKT_ACCESS_TOKEN`: Your Trakt.tv access token (auto-saved by `getTrakt.sh`)
+- `TRAKT_REFRESH_TOKEN`: Generated by `getTrakt.sh` (for future token refresh)
 
 ### Obtaining API Keys
 
@@ -164,9 +205,38 @@ The application uses environment variables for configuration:
 #### Trakt.tv API Access
 
 1. Create an account on [Trakt.tv](https://trakt.tv)
-2. Go to [Settings &gt; Your API Applications](https://trakt.tv/oauth/applications)
+2. Go to [Settings > Your API Applications](https://trakt.tv/oauth/applications)
 3. Create a new application to get your Client ID and Client Secret
-4. Run `./getTrakt.sh` and follow the instructions to generate your access token
+4. Set `TRAKT_CLIENT_ID` and `TRAKT_CLIENT_SECRET`, then run `./getTrakt.sh`
+5. The script handles the full device-code OAuth flow and saves tokens to `~/.zshrc` automatically
+
+## Caching
+
+WatchWise uses two cache layers to keep things fast:
+
+### Translation Cache (Persistent)
+
+Translations are stored in `.trans_cache.json` in the project directory.
+
+- Loaded automatically at startup
+- Auto-saved to disk on exit and after every batch translate
+- Parallel batch translation via `deep_translator` (`GoogleTranslator`) — up to 10 concurrent threads
+- Already-cached strings are served instantly with zero network calls
+- Cache survives across sessions — you never re-translate the same text twice
+
+Clear the cache when needed:
+
+```bash
+python WatchSearch.py --clear-cache
+```
+
+### TMDB Search Cache (In-Memory)
+
+TMDB search results are cached in memory for the duration of the session.
+
+- Keyed by query, year, genre, limit, and description length
+- Repeat searches with the same parameters hit the cache instantly instead of re-querying TMDB
+- Especially useful in interactive mode (`-w -i`) where you may search the same term multiple times
 
 ## Contributing
 
