@@ -59,6 +59,107 @@ _trans_cache: dict = _load_trans_cache()   # loaded from disk on startup
 import atexit as _atexit
 _atexit.register(lambda: _save_trans_cache(_trans_cache))  # auto-save on exit
 
+# ── Persistent watched cache (survives restarts; Trakt syncs in background) ──
+_WATCHED_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.watched_cache.json')
+
+def _load_watched_file() -> set:
+    """Load watched titles from disk cache (fast, no network)."""
+    try:
+        import json as _j
+        with open(_WATCHED_CACHE_FILE, 'r', encoding='utf-8') as f:
+            return set(_j.load(f).get('titles', []))
+    except Exception:
+        return set()
+
+def _save_watched_file(titles: set) -> None:
+    """Persist watched titles to disk cache."""
+    try:
+        import json as _j, datetime as _dt
+        with open(_WATCHED_CACHE_FILE, 'w', encoding='utf-8') as f:
+            _j.dump({'titles': sorted(titles), 'updated': _dt.datetime.now().isoformat()}, f)
+    except Exception:
+        pass
+
+# ── Persistent trailer cache ──────────────────────────────────────────────────
+_TRAILER_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.trailer_cache.json')
+_IMAGE_CACHE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.image_cache')
+
+def _load_trailer_file() -> dict:
+    """Load trailer keys from disk cache."""
+    try:
+        import json as _j
+        with open(_TRAILER_CACHE_FILE, 'r', encoding='utf-8') as f:
+            return _j.load(f)
+    except Exception:
+        return {}
+
+def _save_trailer_file(cache: dict) -> None:
+    try:
+        import json as _j
+        with open(_TRAILER_CACHE_FILE, 'w', encoding='utf-8') as f:
+            _j.dump(cache, f)
+    except Exception:
+        pass
+
+def _image_disk_path(poster_path: str) -> str:
+    import hashlib
+    ext = os.path.splitext(poster_path)[1] or '.jpg'
+    fname = hashlib.md5(poster_path.encode()).hexdigest() + ext
+    return os.path.join(_IMAGE_CACHE_DIR, fname)
+
+def _get_image_from_disk(poster_path: str):
+    """Returns (bytes, content_type) or None."""
+    try:
+        fpath = _image_disk_path(poster_path)
+        with open(fpath, 'rb') as f:
+            data = f.read()
+        ext = os.path.splitext(fpath)[1].lower().lstrip('.')
+        ct = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp'}.get(ext, 'image/jpeg')
+        return data, ct
+    except Exception:
+        return None
+
+def _save_image_to_disk(poster_path: str, data: bytes) -> None:
+    try:
+        os.makedirs(_IMAGE_CACHE_DIR, exist_ok=True)
+        with open(_image_disk_path(poster_path), 'wb') as f:
+            f.write(data)
+    except Exception:
+        pass
+
+# ── 1 GB combined disk cache size limit ───────────────────────────────────────
+_CACHE_SIZE_LIMIT = 1 * 1024 ** 3  # 1 GB
+
+def _total_cache_size() -> int:
+    """Return combined bytes of all disk cache files."""
+    total = 0
+    for f in [_TRANS_CACHE_FILE, _TRAILER_CACHE_FILE, _WATCHED_CACHE_FILE]:
+        try:
+            total += os.path.getsize(f)
+        except OSError:
+            pass
+    if os.path.isdir(_IMAGE_CACHE_DIR):
+        for fname in os.listdir(_IMAGE_CACHE_DIR):
+            try:
+                total += os.path.getsize(os.path.join(_IMAGE_CACHE_DIR, fname))
+            except OSError:
+                pass
+    return total
+
+def _auto_clear_if_over_limit() -> bool:
+    """Clear ALL disk caches if combined size exceeds 1 GB. Returns True if cleared."""
+    if _total_cache_size() < _CACHE_SIZE_LIMIT:
+        return False
+    import shutil
+    for f in [_TRANS_CACHE_FILE, _TRAILER_CACHE_FILE, _WATCHED_CACHE_FILE]:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    shutil.rmtree(_IMAGE_CACHE_DIR, ignore_errors=True)
+    print("[cache] Combined disk size exceeded 1 GB — all disk caches cleared")
+    return True
+
 # ── In-memory search cache (current session only — TMDB results can change) ───
 _search_cache: dict = {}  # (query, year, genre, limit, desc_length) → {movies:[...], tvs:[...]}
 
@@ -277,19 +378,35 @@ def parse_arguments():
 
     parser.add_argument("--clear-cache",
                         action="store_true",
-                        help="Clear the persistent translation cache and exit")
+                        help="Clear all persistent caches (translation, trailer, images, watched) and exit")
 
     args = parser.parse_args()
 
     # Handle --clear-cache before anything else
     if args.clear_cache:
+        cleared = []
         if os.path.exists(_TRANS_CACHE_FILE):
             size_kb = os.path.getsize(_TRANS_CACHE_FILE) // 1024
             os.remove(_TRANS_CACHE_FILE)
             _trans_cache.clear()
-            print(f"{Colors.GREEN}Translation cache cleared ({size_kb} KB).{Colors.END}")
+            cleared.append(f"translation ({size_kb} KB)")
         else:
-            print(f"{Colors.CYAN}Translation cache is already empty.{Colors.END}")
+            cleared.append("translation (already empty)")
+        n = len(_search_cache)
+        _search_cache.clear()
+        cleared.append(f"search ({n} entries)")
+        import shutil as _shutil
+        if os.path.exists(_TRAILER_CACHE_FILE):
+            os.remove(_TRAILER_CACHE_FILE)
+            cleared.append("trailer (disk)")
+        if os.path.isdir(_IMAGE_CACHE_DIR):
+            count = len(os.listdir(_IMAGE_CACHE_DIR))
+            _shutil.rmtree(_IMAGE_CACHE_DIR, ignore_errors=True)
+            cleared.append(f"images ({count} files)")
+        if os.path.exists(_WATCHED_CACHE_FILE):
+            os.remove(_WATCHED_CACHE_FILE)
+            cleared.append("watched (disk)")
+        print(f"{Colors.GREEN}Caches cleared: {', '.join(cleared)}{Colors.END}")
         raise SystemExit(0)
 
     # Convert query list to string
@@ -434,7 +551,7 @@ def get_genre_id(genre_name, is_movie=True):
             return v
     return None
 
-def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20):
+def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20, lang_code=None):
     """Discover movies/TV by genre and/or year via TMDB discover API."""
     import requests as _req
     api_key = os.getenv("TMDB_API_KEY", "")
@@ -443,6 +560,8 @@ def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20):
     params = {"api_key": api_key, "language": "en-US", "sort_by": "popularity.desc", "page": 1}
     if genre_id:
         params["with_genres"] = str(genre_id)
+    if lang_code:
+        params["with_original_language"] = lang_code
     if year:
         if is_movie:
             params["primary_release_year"] = year
@@ -475,6 +594,7 @@ def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20):
             self.overview = d.get("overview", "")
             self.genre_ids = d.get("genre_ids", [])
             self.original_language = d.get("original_language", "")
+            self.poster_path = d.get("poster_path", "")
             if is_movie:
                 self.title = d.get("title", "")
                 self.release_date = d.get("release_date", "")
@@ -508,6 +628,7 @@ def _tmdb_discover(is_movie=True, **kwargs):
             self.name = d.get("name", "")
             self.release_date = d.get("release_date", "")
             self.first_air_date = d.get("first_air_date", "")
+            self.poster_path = d.get("poster_path", "")
 
     return [R(d) for d in items]
 
@@ -1319,6 +1440,8 @@ def run_search(
                 'score': score,
                 'lang': lang_code,
                 'lang_name': lang_name,
+                'tmdb_id': getattr(result, 'id', None),
+                'poster_path': result.__dict__.get('poster_path') or getattr(result, 'poster_path', None) or '',
             }
         except Exception:
             return None
@@ -1339,9 +1462,23 @@ def run_search(
             out = out[:limit]
         return out
 
+    # ── Build browse lang code (ISO) for API-level language filtering ─────────
+    _LANG_NAMES_REV = {v.lower(): k for k, v in _LANG_NAMES.items()}
+    _browse_lang_code = None
+    if lang_filter and not query:
+        for lf in lang_filter:
+            lfl = lf.lower()
+            if lfl in _LANG_NAMES_REV:
+                _browse_lang_code = _LANG_NAMES_REV[lfl]
+                break
+            elif len(lf) <= 3:  # already an ISO code
+                _browse_lang_code = lfl
+                break
+
     # ── Search cache check ─────────────────────────────────────────────────────
     _t_start = _t.time()
-    _cache_key = (query or '', year or '', genre_name or '', limit, desc_length)
+    _lang_key = tuple(sorted(l.lower() for l in lang_filter)) if lang_filter else ()
+    _cache_key = (query or '', year or '', genre_name or '', limit, desc_length, _lang_key)
     _cache_hit = _cache_key in _search_cache
     if _cache_hit:
         cached = _search_cache[_cache_key]
@@ -1355,7 +1492,7 @@ def run_search(
         t0 = _t.time()
         mgid_list, mgid_param = _resolve_multi_genre(genre_name, is_movie=True)
         if not query:
-            primary = browse_by_genre_year(genre_id=mgid_param, year=year, is_movie=True, limit=limit)
+            primary = browse_by_genre_year(genre_id=mgid_param, year=year, is_movie=True, limit=limit, lang_code=_browse_lang_code)
             secondary = []
         elif year:
             try:
@@ -1393,7 +1530,7 @@ def run_search(
         t0 = _t.time()
         tgid_list, tgid_param = _resolve_multi_genre(genre_name, is_movie=False)
         if not query:
-            primary = browse_by_genre_year(genre_id=tgid_param, year=year, is_movie=False, limit=limit)
+            primary = browse_by_genre_year(genre_id=tgid_param, year=year, is_movie=False, limit=limit, lang_code=_browse_lang_code)
             secondary = []
         elif year:
             try:
@@ -1662,6 +1799,16 @@ section{{margin-bottom:48px}}
   background:#1a1a0a;color:#facc15;border:1px solid #854d0e;font-weight:600}}
 .lang-badges{{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}}
 .overview{{font-size:1.1rem;color:#c0c8d8;line-height:1.75;margin-top:12px}}
+.poster-img{{width:60px;height:90px;object-fit:cover;border-radius:6px;flex-shrink:0;margin-right:4px}}
+.trailer-btn{{background:#1e0a3c;color:#c084fc;border:1.5px solid #6d28d9;border-radius:6px;
+  padding:5px 14px;font-size:.82rem;cursor:pointer;font-weight:700;margin-top:10px;display:inline-block}}
+.trailer-btn:hover{{background:#2d1060;border-color:#a78bfa}}
+.trailer-btn:disabled{{opacity:.5;cursor:default}}
+.trailer-overlay{{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:2000;
+  display:flex;align-items:center;justify-content:center;cursor:pointer}}
+.trailer-modal-box{{width:min(88vw,960px);aspect-ratio:16/9;border-radius:14px;overflow:hidden;
+  box-shadow:0 0 80px rgba(124,58,237,.6);cursor:default;flex-shrink:0}}
+.trailer-modal-iframe{{width:100%;height:100%;border:none;display:block}}
 .empty{{color:#374151;font-style:italic;padding:20px;text-align:center}}
 #loading{{display:none;text-align:center;padding:40px;color:#4b5563;font-size:1.1rem}}
 /* ── RTL (Hebrew) — only results boxes, filter bar stays LTR ── */
@@ -1752,6 +1899,12 @@ section{{margin-bottom:48px}}
     <div class="grid" id="grid-tv"></div>
   </section>
 </div>
+<div id="trailer-overlay" class="trailer-overlay" style="display:none">
+  <div class="trailer-modal-box" id="trailer-modal-box">
+    <iframe id="trailer-modal-iframe" class="trailer-modal-iframe"
+      allowfullscreen allow="autoplay; encrypted-media; fullscreen"></iframe>
+  </div>
+</div>
 <script>
 (function(){{
   const TODAY = '{today_str}';
@@ -1793,6 +1946,14 @@ section{{margin-bottom:48px}}
     card.dataset.genres = (item.genres || []).join('|').toLowerCase();
 
     const top = makeEl('div', 'card-top');
+    if (item.poster_path) {{
+      const poster = document.createElement('img');
+      poster.className = 'poster-img';
+      poster.src = '/api/image?path=' + encodeURIComponent(item.poster_path);
+      poster.alt = item.title || '';
+      poster.onerror = function() {{ this.style.display = 'none'; }};
+      top.appendChild(poster);
+    }}
     const icon = makeEl('span', 'icon', kind === 'movie' ? '🎬' : '📺');
     top.appendChild(icon);
 
@@ -1821,6 +1982,30 @@ section{{margin-bottom:48px}}
     top.appendChild(main);
     card.appendChild(top);
     card.appendChild(makeEl('div', 'overview', item.overview || ''));
+    if (item.tmdb_id) {{
+      const trailerBtn = makeEl('button', 'trailer-btn', '▶ Trailer');
+      trailerBtn.addEventListener('click', function() {{
+        trailerBtn.disabled = true;
+        trailerBtn.textContent = '⏳ Loading…';
+        fetch('/api/trailer?id=' + item.tmdb_id + '&type=' + kind)
+          .then(r => r.json())
+          .then(d => {{
+            trailerBtn.disabled = false;
+            trailerBtn.textContent = '▶ Trailer';
+            if (d.key) {{
+              openTrailerModal(d.key);
+            }} else {{
+              trailerBtn.textContent = '⚠ No trailer';
+              trailerBtn.disabled = true;
+            }}
+          }})
+          .catch(() => {{
+            trailerBtn.disabled = false;
+            trailerBtn.textContent = '⚠ Error';
+          }});
+      }});
+      card.appendChild(trailerBtn);
+    }}
     return card;
   }}
 
@@ -2069,6 +2254,24 @@ section{{margin-bottom:48px}}
       .catch(() => {{}});
   }})();
 
+  // ── Trailer modal ─────────────────────────────────────────────────────────
+  const _tOverlay = gv('trailer-overlay');
+  const _tIframe  = gv('trailer-modal-iframe');
+  const _tBox     = gv('trailer-modal-box');
+
+  function openTrailerModal(key) {{
+    _tIframe.src = 'https://www.youtube.com/embed/' + key + '?autoplay=1';
+    _tOverlay.style.display = 'flex';
+  }}
+  function closeTrailerModal() {{
+    _tOverlay.style.display = 'none';
+    _tIframe.src = '';
+  }}
+  // Click on backdrop closes modal; clicks inside the box do not
+  _tOverlay.addEventListener('click', closeTrailerModal);
+  _tBox.addEventListener('click', function(e) {{ e.stopPropagation(); }});
+  document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') closeTrailerModal(); }});
+
   // Apply direction on load, then run initial search if args were provided
   applyDirection();
   if ('{iq}' || '{iyr}' || '{ign}') doSearch();
@@ -2085,6 +2288,9 @@ def run_interactive_server(init_args, watched_set=None) -> None:
     import json as _json
     import socket
     import urllib.parse
+
+    _trailer_cache: dict = _load_trailer_file()  # (tmdb_id:media_type) -> youtube_key or None
+    _image_cache:   dict = {}                    # poster_path -> (bytes, content_type) — memory only
 
     if watched_set is None:
         watched_set = set()
@@ -2146,6 +2352,83 @@ def run_interactive_server(init_args, watched_set=None) -> None:
                 langs = sorted(_LANG_NAMES.values())
                 body = _json.dumps(langs, ensure_ascii=False).encode('utf-8')
                 self._send(200, 'application/json; charset=utf-8', body)
+            elif parsed.path == '/api/clear-cache':
+                import shutil
+                sc = len(_search_cache);  _search_cache.clear()
+                tc = len(_trailer_cache); _trailer_cache.clear()
+                ic = len(_image_cache);   _image_cache.clear()
+                # wipe disk caches
+                for _cf in [_TRANS_CACHE_FILE, _TRAILER_CACHE_FILE, _WATCHED_CACHE_FILE]:
+                    try: os.remove(_cf)
+                    except OSError: pass
+                shutil.rmtree(_IMAGE_CACHE_DIR, ignore_errors=True)
+                if hasattr(watched_set, 'refresh'):
+                    watched_set.refresh()
+                    print(f"[cache] cleared: search={sc} trailer={tc} image={ic} + disk caches + watched refreshing")
+                else:
+                    print(f"[cache] cleared: search={sc} trailer={tc} image={ic} + disk caches")
+                body = _json.dumps({'search': sc, 'trailer': tc, 'image': ic}).encode('utf-8')
+                self._send(200, 'application/json; charset=utf-8', body)
+            elif parsed.path == '/api/trailer':
+                import urllib.request as _ur
+                params = urllib.parse.parse_qs(parsed.query)
+                tmdb_id = params.get('id', [None])[0]
+                media_type = params.get('type', ['movie'])[0]
+                _tkey = f"{tmdb_id}:{media_type}"  # string key for JSON-serialisable disk cache
+                if _tkey in _trailer_cache:
+                    trailer_key = _trailer_cache[_tkey]
+                else:
+                    api_key = os.getenv('TMDB_API_KEY', '')
+                    trailer_key = None
+                    if tmdb_id and api_key:
+                        try:
+                            _url = (f'https://api.themoviedb.org/3/{media_type}/{tmdb_id}'
+                                    f'/videos?api_key={api_key}&language=en-US')
+                            with _ur.urlopen(_url, timeout=8) as _resp:
+                                _vdata = _json.loads(_resp.read())
+                            for _v in _vdata.get('results', []):
+                                if _v.get('site') == 'YouTube' and _v.get('type') == 'Trailer':
+                                    trailer_key = _v['key']
+                                    break
+                            print(f"[trailer] id={tmdb_id} key={trailer_key}")
+                        except Exception as _e:
+                            print(f"[trailer] ERROR id={tmdb_id}: {_e}")
+                    _trailer_cache[_tkey] = trailer_key
+                    _save_trailer_file(_trailer_cache)
+                    _auto_clear_if_over_limit()
+                body = _json.dumps({'key': trailer_key}).encode('utf-8')
+                self._send(200, 'application/json; charset=utf-8', body)
+            elif parsed.path == '/api/image':
+                import urllib.request as _ur
+                params = urllib.parse.parse_qs(parsed.query)
+                img_path = params.get('path', [''])[0]
+                if img_path:
+                    # 1) memory cache
+                    if img_path in _image_cache:
+                        img_data, img_ct = _image_cache[img_path]
+                        self._send(200, img_ct, img_data)
+                    else:
+                        # 2) disk cache
+                        _disk = _get_image_from_disk(img_path)
+                        if _disk:
+                            img_data, img_ct = _disk
+                            _image_cache[img_path] = (img_data, img_ct)
+                            self._send(200, img_ct, img_data)
+                        else:
+                            # 3) fetch from TMDB
+                            try:
+                                _url = 'https://image.tmdb.org/t/p/w154' + img_path
+                                with _ur.urlopen(_url, timeout=8) as _resp:
+                                    img_data = _resp.read()
+                                    img_ct = _resp.headers.get('Content-Type', 'image/jpeg')
+                                _image_cache[img_path] = (img_data, img_ct)
+                                _save_image_to_disk(img_path, img_data)
+                                _auto_clear_if_over_limit()
+                                self._send(200, img_ct, img_data)
+                            except Exception:
+                                self._send(404, 'text/plain', b'image not found')
+                else:
+                    self._send(400, 'text/plain', b'missing path')
             else:
                 self._send(404, 'text/plain', b'Not found')
 
@@ -2624,16 +2907,23 @@ if args.web:
         _watched_ready = _threading.Event()
 
         def _load_watched():
-            ws: set = set()
+            # Phase 1: load from disk instantly — app is usable immediately
+            ws: set = _load_watched_file()
+            _watched_container.append(ws)
+            _watched_ready.set()
+            # Phase 2: sync from Trakt in background — merge + save to disk
+            trakt: set = set()
             if get_all_watched_titles is not None:
                 try:
-                    ws = {t.lower() for t in get_all_watched_titles()}
+                    trakt = {t.lower() for t in get_all_watched_titles()}
                 except Exception:
                     pass
             elif 'watched_titles_lower' in dir():
-                ws = watched_titles_lower  # type: ignore[name-defined]
-            _watched_container.append(ws)
-            _watched_ready.set()
+                trakt = watched_titles_lower  # type: ignore[name-defined]
+            if trakt:
+                merged = ws | trakt
+                _watched_container[0] = merged
+                _save_watched_file(merged)
 
         _threading.Thread(target=_load_watched, daemon=True).start()
 
@@ -2641,10 +2931,13 @@ if args.web:
         class _LazyWatched:
             """Proxy that loads watched set in background; blocks only on first access."""
             def is_ready(self) -> bool:
-                """Non-blocking check: True once background load has completed."""
                 return _watched_ready.is_set()
+            def refresh(self):
+                """Re-fetch watched titles from Trakt in a background thread."""
+                _watched_ready.clear()
+                _watched_container.clear()
+                _threading.Thread(target=_load_watched, daemon=True).start()
             def __bool__(self):
-                """Non-blocking: True if watched module is available (data may still be loading)."""
                 return get_all_watched_titles is not None
             def __contains__(self, item):
                 _watched_ready.wait()

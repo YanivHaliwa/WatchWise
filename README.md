@@ -17,9 +17,12 @@ A set of CLI tools to search for movies and TV shows with optional filtering bas
 - 🔎 **Description Search**: Find media that matches keywords in descriptions
 - 🏷️ **Genre & Language Badges**: Visual display of genres and original language for each result
 - 🌐 **Hebrew Translation**: Translate titles, descriptions, and genres to Hebrew via `deep_translator` (GoogleTranslator) with persistent disk cache — already-translated strings are served instantly without any network call
-- ⚡ **Smart Caching**: Persistent translation cache on disk + in-memory TMDB search cache per session to avoid redundant API calls
+- ⚡ **Smart Caching**: Four cache layers — persistent translation, trailer, and image caches on disk + in-memory TMDB search cache per session. Watched history loads from disk instantly, then syncs Trakt in the background.
 - 🖥️ **Web View**: Display results as a styled dark-theme HTML page opened in Firefox
 - ⚡ **Interactive Mode**: Full in-browser SPA with live filters for type, year, genre, language, and watched status (requires web mode)
+- 🖼️ **Poster Images**: Movie/show cover art displayed inside each result card (interactive mode)
+- 🎬 **YouTube Trailer Modal**: Watch trailers without leaving the page — fullscreen overlay with ESC or click-outside to close (interactive mode)
+- 🛡️ **1 GB Cache Size Guard**: If all disk caches combined exceed 1 GB, they are auto-cleared to free space
 - 📊 **Relevance Scoring**: Results ranked by how closely they match your query
 - 🔜 **Coming Soon Badges**: Upcoming releases are automatically labeled in web view
 
@@ -146,7 +149,7 @@ python WatchSearch.py -w -i "Inception"
 python WatchSearch.py -w -i              # launch blank interactive mode
 ```
 
-Clear the persistent translation cache:
+Clear all persistent caches (translation, trailer, images, watched):
 
 ```bash
 python WatchSearch.py --clear-cache
@@ -212,9 +215,9 @@ The application uses environment variables for configuration:
 
 ## Caching
 
-WatchWise uses two cache layers to keep things fast:
+WatchWise uses four cache layers to keep things fast:
 
-### Translation Cache (Persistent)
+### Translation Cache (`.trans_cache.json`)
 
 Translations are stored in `.trans_cache.json` in the project directory.
 
@@ -224,24 +227,36 @@ Translations are stored in `.trans_cache.json` in the project directory.
 - Already-cached strings are served instantly with zero network calls
 - Cache survives across sessions — you never re-translate the same text twice
 
-Clear the cache when needed:
-
-```bash
-python WatchSearch.py --clear-cache
-```
-
-### Watched Titles Cache (Persistent)
+### Watched Titles Cache (`.watched_cache.json`)
 
 Your Trakt.tv watch history is saved to `.watched_cache.json` in the project directory.
 
-- First run with `-n`: fetches from Trakt API (~25s), saves to disk
-- Subsequent runs: loads from disk instantly (near 0s)
-- Cache auto-refreshes after **30 days**
-- Force a refresh manually:
+Two-phase load for instant startup:
+
+- **Phase 1**: Loads from `.watched_cache.json` instantly on startup (non-blocking) — watched badges appear immediately
+- **Phase 2**: Trakt sync runs in a background thread, merges any new titles, and saves back to disk — new titles from Trakt appear after background sync completes
+
+Force a full refresh with `watched.py`:
 
 ```bash
 python watched.py -r
 ```
+
+### Trailer Cache (`.trailer_cache.json`)
+
+YouTube trailer keys are stored in `.trailer_cache.json` in the project directory.
+
+- Maps TMDB ID → YouTube trailer key
+- Persists across restarts — no re-fetching for movies already seen
+- Populated on demand when you click ▶ Trailer in interactive mode
+
+### Image Cache (`.image_cache/`)
+
+Poster image files are stored in the `.image_cache/` directory.
+
+- MD5-named files, approximately 15 KB each
+- Three-tier lookup: memory → disk → TMDB network
+- Populated on demand when interactive mode loads poster images
 
 ### TMDB Search Cache (In-Memory)
 
@@ -250,6 +265,16 @@ TMDB search results are cached in memory for the duration of the session.
 - Keyed by query, year, genre, limit, and description length
 - Repeat searches with the same parameters hit the cache instantly instead of re-querying TMDB
 - Especially useful in interactive mode (`-w -i`) where you may search the same term multiple times
+
+### Cache Size Limit
+
+All four disk caches (translation, watched, trailer, images) share a **1 GB combined size limit**.
+
+When the limit is reached, all disk caches are auto-cleared automatically to free space. You can also clear all caches manually:
+
+```bash
+python WatchSearch.py --clear-cache
+```
 
 ## Contributing
 
