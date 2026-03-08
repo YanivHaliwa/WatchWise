@@ -3,7 +3,7 @@ from tmdbv3api import TMDb, Movie, TV, Genre
 import sys
 import os
 import argparse
-
+import webbrowser
 import subprocess
 import time as _startup_timer
 
@@ -389,11 +389,11 @@ def parse_arguments():
 
     parser.add_argument("-w", "--web",
                         action="store_true",
-                        help="Display results as a static styled web page (opens Firefox)")
+                        help="Open search results as a styled HTML page in the browser")
 
     parser.add_argument("-i", "--interactive",
                         action="store_true",
-                        help="Launch live interactive server with sort, filters, trailers, and scores (implies -w)")
+                        help="Launch live interactive server with sort, filters, trailers, and scores (opens browser)")
 
     parser.add_argument("--clear-cache",
                         action="store_true",
@@ -2430,7 +2430,7 @@ section{{margin-bottom:48px}}
 </html>"""
 
 
-def run_interactive_server(init_args, watched_set=None) -> None:
+def run_interactive_server(init_args, watched_set=None, open_browser_event=None) -> None:
     """Start a persistent HTTP server for live filter-driven TMDB search."""
     import http.server
     import socketserver
@@ -2606,7 +2606,9 @@ def run_interactive_server(init_args, watched_set=None) -> None:
     url = f'http://127.0.0.1:{port}/'
     print(f"\n{Colors.GREEN}Interactive server: {url}{Colors.END}")
     print(f"{Colors.CYAN}Ctrl+C to stop{Colors.END}\n")
-    subprocess.Popen(['/usr/bin/firefox-nightly', url])
+    if open_browser_event is not None:
+        open_browser_event.wait()  # wait for Trakt auth/sync before opening browser
+    webbrowser.open(url)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -3056,13 +3058,14 @@ if args.web:
         import threading as _threading
         _watched_container: list = []
         _watched_ready = _threading.Event()
+        _trakt_sync_done = _threading.Event()
 
         def _load_watched():
             # Phase 1: load from disk instantly — app is usable immediately
             ws: set = _load_watched_file()
             _watched_container.append(ws)
             _watched_ready.set()
-            # Phase 2: sync from Trakt in background — merge + save to disk
+            # Phase 2: sync from Trakt (may require interactive re-auth — must complete before browser opens)
             trakt: set = set()
             if get_all_watched_titles is not None:
                 try:
@@ -3071,6 +3074,7 @@ if args.web:
                     pass
             elif 'watched_titles_lower' in dir():
                 trakt = watched_titles_lower  # type: ignore[name-defined]
+            _trakt_sync_done.set()  # signal: Trakt auth + sync complete (or not needed)
             if trakt:
                 merged = ws | trakt
                 _watched_container[0] = merged
@@ -3100,7 +3104,7 @@ if args.web:
                 _watched_ready.wait()
                 return len(_watched_container[0])
 
-        run_interactive_server(args, watched_set=_LazyWatched())  # type: ignore[arg-type]
+        run_interactive_server(args, watched_set=_LazyWatched(), open_browser_event=_trakt_sync_done)  # type: ignore[arg-type]
     else:
         # Static web output — batch-translate web items if -t flag set
         if args.translate and (web_movie_items or web_tv_items):
