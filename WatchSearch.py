@@ -320,11 +320,30 @@ DESCRIPTION_LENGTH = 1000  # Number of characters to show from description (0 fo
 # Parse command line arguments
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Search for movies and TV shows from TMDB API",
-        formatter_class=argparse.RawTextHelpFormatter
+        description="WatchWise — Search movies and TV shows via TMDB.\n"
+                    "With no query/year/genre, browse the latest releases.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python WatchSearch.py 'Inception'            # search both movies & TV\n"
+            "  python WatchSearch.py -m -y 2024 'Marvel'   # movies only, year filtered\n"
+            "  python WatchSearch.py -g Action -y 2023     # browse Action from 2023\n"
+            "  python WatchSearch.py -w 'Matrix'           # static results page in browser\n"
+            "  python WatchSearch.py -i                    # live interactive server (browse latest)\n"
+            "  python WatchSearch.py -i 'Batman'           # live interactive server with query\n"
+            "  python WatchSearch.py --clear-cache         # wipe all disk caches\n"
+            "\n"
+            "Interactive mode (-i) features:\n"
+            "  • Live filters: type, year, genre, language, limit, desc length\n"
+            "  • Unwatched filter, Hebrew translation toggle\n"
+            "  • Soon toggle: show/hide upcoming releases (default: hidden)\n"
+            "  • Sort bar: Latest / Top Rated / Trending / Name / Language\n"
+            "  • Rating (⭐) and Trending (🔥) scores on every card\n"
+            "  • Poster images and YouTube trailer modal\n"
+        )
     )
 
-    parser.add_argument("query", nargs="*", help="Search query (title or keywords). Optional if -y or -g is provided.")
+    parser.add_argument("query", nargs="*", help="Search query (title or keywords). Optional — omit to browse latest releases.")
 
     parser.add_argument("-m", "--movies-only",
                         action="store_true",
@@ -370,11 +389,11 @@ def parse_arguments():
 
     parser.add_argument("-w", "--web",
                         action="store_true",
-                        help="Display results in a nice webpage (opens Firefox)")
+                        help="Display results as a static styled web page (opens Firefox)")
 
     parser.add_argument("-i", "--interactive",
                         action="store_true",
-                        help="Add live interactive filter panel to the webpage (requires -w)")
+                        help="Launch live interactive server with sort, filters, trailers, and scores (implies -w)")
 
     parser.add_argument("--clear-cache",
                         action="store_true",
@@ -437,9 +456,9 @@ def parse_arguments():
         print(f"{Colors.RED}Error: Cannot use --not-watched flag. watched.py module is not available.{Colors.END}")
         sys.exit(1)
 
-    # --interactive requires --web
-    if args.interactive and not args.web:
-        parser.error("--interactive (-i) requires --web (-w)")
+    # -i implies -w
+    if args.interactive:
+        args.web = True
 
     return args
 
@@ -551,17 +570,24 @@ def get_genre_id(genre_name, is_movie=True):
             return v
     return None
 
-def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20, lang_code=None):
+def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20, lang_code=None, sort_by=None, date_lte=None):
     """Discover movies/TV by genre and/or year via TMDB discover API."""
     import requests as _req
     api_key = os.getenv("TMDB_API_KEY", "")
     media = "movie" if is_movie else "tv"
     url = f"https://api.themoviedb.org/3/discover/{media}"
-    params = {"api_key": api_key, "language": "en-US", "sort_by": "popularity.desc", "page": 1}
+    if sort_by is None:
+        sort_by = "release_date.desc" if is_movie else "first_air_date.desc"
+    params = {"api_key": api_key, "language": "en-US", "sort_by": sort_by, "page": 1}
     if genre_id:
         params["with_genres"] = str(genre_id)
     if lang_code:
         params["with_original_language"] = lang_code
+    if date_lte:
+        if is_movie:
+            params["release_date.lte"] = date_lte
+        else:
+            params["first_air_date.lte"] = date_lte
     if year:
         if is_movie:
             params["primary_release_year"] = year
@@ -601,6 +627,9 @@ def browse_by_genre_year(genre_id=None, year=None, is_movie=True, limit=20, lang
             else:
                 self.name = d.get("name", "")
                 self.first_air_date = d.get("first_air_date", "")
+            self.vote_average = d.get("vote_average", 0)
+            self.vote_count   = d.get("vote_count", 0)
+            self.popularity   = d.get("popularity", 0)
 
     return [R(d, is_movie) for d in results[:limit]]
 
@@ -629,6 +658,9 @@ def _tmdb_discover(is_movie=True, **kwargs):
             self.release_date = d.get("release_date", "")
             self.first_air_date = d.get("first_air_date", "")
             self.poster_path = d.get("poster_path", "")
+            self.vote_average = d.get("vote_average", 0)
+            self.vote_count   = d.get("vote_count", 0)
+            self.popularity   = d.get("popularity", 0)
 
     return [R(d) for d in items]
 
@@ -1393,6 +1425,7 @@ def run_search(
     watched_set=None,
     lang_filter=None,  # list of full language names (case-insensitive)
     whole_word: bool = False,
+    show_soon: bool = False,
 ) -> dict:
     """Re-run TMDB search with given parameters. Returns {movies, tvs, timing}."""
     import time as _t
@@ -1442,6 +1475,9 @@ def run_search(
                 'lang_name': lang_name,
                 'tmdb_id': getattr(result, 'id', None),
                 'poster_path': result.__dict__.get('poster_path') or getattr(result, 'poster_path', None) or '',
+                'vote_average': round(float(getattr(result, 'vote_average', 0) or 0), 1),
+                'vote_count':   int(getattr(result, 'vote_count', 0) or 0),
+                'popularity':   round(float(getattr(result, 'popularity', 0) or 0), 1),
             }
         except Exception:
             return None
@@ -1492,7 +1528,9 @@ def run_search(
         t0 = _t.time()
         mgid_list, mgid_param = _resolve_multi_genre(genre_name, is_movie=True)
         if not query:
-            primary = browse_by_genre_year(genre_id=mgid_param, year=year, is_movie=True, limit=limit, lang_code=_browse_lang_code)
+            _browse_lim = limit if show_soon else limit * 3  # fetch extra to compensate for future filtering
+            primary = browse_by_genre_year(genre_id=mgid_param, year=year, is_movie=True, limit=_browse_lim, lang_code=_browse_lang_code,
+                                           date_lte=None if show_soon else today)
             secondary = []
         elif year:
             try:
@@ -1530,7 +1568,9 @@ def run_search(
         t0 = _t.time()
         tgid_list, tgid_param = _resolve_multi_genre(genre_name, is_movie=False)
         if not query:
-            primary = browse_by_genre_year(genre_id=tgid_param, year=year, is_movie=False, limit=limit, lang_code=_browse_lang_code)
+            _browse_lim_tv = limit if show_soon else limit * 3
+            primary = browse_by_genre_year(genre_id=tgid_param, year=year, is_movie=False, limit=_browse_lim_tv, lang_code=_browse_lang_code,
+                                           date_lte=None if show_soon else today)
             secondary = []
         elif year:
             try:
@@ -1562,6 +1602,11 @@ def run_search(
             if d:
                 tv_items.append(d)
         timing['_tmdb_tv'] = round(_t.time() - t0, 2)
+
+    # ── Filter future releases if show_soon is False ──────────────────────────
+    if not show_soon:
+        movie_items = [i for i in movie_items if not i.get('is_future')][:limit]
+        tv_items    = [i for i in tv_items    if not i.get('is_future')][:limit]
 
     # ── Store in search cache (raw English, before nw/type/translate) ─────────
     if not _cache_hit:
@@ -1818,6 +1863,32 @@ section{{margin-bottom:48px}}
 #results.rtl .sec-count{{margin-left:0;margin-right:auto}}
 #results.rtl .soon-badge{{margin-left:0;margin-right:7px}}
 @media(max-width:760px){{.grid{{grid-template-columns:1fr}}}}
+#sort-bar{{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 0 2px;
+  border-top:1px solid #1e1b40;
+  margin-top:8px;
+}}
+.sort-label{{font-size:.7rem;color:#4b5563;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-right:4px}}
+.sort-btn{{
+  background:transparent;color:#6b7280;border:1.5px solid #1f2937;
+  border-radius:20px;padding:5px 14px;font-size:.8rem;font-weight:700;cursor:pointer;
+  transition:all .18s ease;letter-spacing:.3px;
+}}
+.sort-btn:hover{{color:#c4b5fd;border-color:#4c1d95;background:#12082a}}
+.sort-btn.active{{
+  background:linear-gradient(135deg,#1e0a40,#12082a);
+  color:#a78bfa;border-color:#7c3aed;
+  box-shadow:0 0 12px rgba(124,58,237,.35);
+}}
+.sort-btn.active.asc::after{{content:' ↑';font-size:.75rem}}
+.sort-btn.active.desc::after{{content:' ↓';font-size:.75rem}}
+.sort-dir{{display:none}}
+.score-row{{display:flex;gap:8px;margin-top:5px;flex-wrap:wrap}}
+.score-badge{{display:inline-flex;align-items:center;gap:3px;font-size:.75rem;font-weight:700;
+  padding:2px 9px;border-radius:20px;letter-spacing:.2px}}
+.score-vote{{background:#1a1200;color:#fbbf24;border:1px solid #92400e}}
+.score-trend{{background:#0a0f1a;color:#60a5fa;border:1px solid #1e3a5f}}
 </style>
 </head>
 <body>
@@ -1874,11 +1945,23 @@ section{{margin-bottom:48px}}
     <div class="fb-group fb-check">
       <label><input id="f-translate" type="checkbox" {"checked" if itr=="true" else ""}> Hebrew</label>
     </div>
+    <div class="fb-group fb-check">
+      <label><input id="f-soon" type="checkbox"> Soon</label>
+    </div>
     <button id="btn-search">Search</button>
     <button id="btn-clear">✕ Clear</button>
   </div>
   <div class="fb-status" id="fb-status">Ready.</div>
   <div class="timing" id="fb-timing"></div>
+  <div id="sort-bar">
+    <span class="sort-label">Sort</span>
+    <button class="sort-btn active" data-sort="date">📅 Latest</button>
+    <button class="sort-btn" data-sort="vote">⭐ Top Rated</button>
+    <button class="sort-btn" data-sort="trending">🔥 Trending</button>
+    <button class="sort-btn" data-sort="name">🔤 Name</button>
+    <button class="sort-btn" data-sort="lang">🌐 Language</button>
+    <span class="sort-dir" id="sort-dir">↓</span>
+  </div>
 </div>
 <div id="loading">⏳ Searching...</div>
 <div class="wrap" id="results">
@@ -1979,6 +2062,18 @@ section{{margin-bottom:48px}}
     }}
     if (badgeRow.children.length) main.appendChild(badgeRow);
 
+    // ── Rating + Trending scores ──────────────────────────────────────────
+    const scoreRow = makeEl('div', 'score-row');
+    if (item.vote_average) {{
+      const stars = item.vote_average >= 7 ? '⭐' : item.vote_average >= 5 ? '🌟' : '☆';
+      scoreRow.appendChild(makeEl('span', 'score-badge score-vote', stars + ' ' + item.vote_average.toFixed(1)));
+    }}
+    if (item.popularity) {{
+      const pop = item.popularity >= 100 ? '🔥🔥' : item.popularity >= 30 ? '🔥' : '📈';
+      scoreRow.appendChild(makeEl('span', 'score-badge score-trend', pop + ' ' + item.popularity.toFixed(0)));
+    }}
+    if (scoreRow.children.length) main.appendChild(scoreRow);
+
     top.appendChild(main);
     card.appendChild(top);
     card.appendChild(makeEl('div', 'overview', item.overview || ''));
@@ -2009,6 +2104,60 @@ section{{margin-bottom:48px}}
     return card;
   }}
 
+  // ── Sort state ────────────────────────────────────────────────────────────
+  let _rawMovies = [], _rawTvs = [];
+  let _sortKey = 'date', _sortAsc = true;
+
+  // For these keys ↑ means "high/new first" (numerically descending).
+  // For name/lang ↑ means A-first (numerically ascending). Normal intuition.
+  const _invertArrow = new Set(['date', 'vote', 'trending']);
+
+  function _sortItems(items) {{
+    const arr = [...items];
+    arr.sort((a, b) => {{
+      let va, vb;
+      if (_sortKey === 'date')     {{ va = a.date || '';        vb = b.date || ''; }}
+      else if (_sortKey === 'vote'){{ va = a.vote_average || 0; vb = b.vote_average || 0; }}
+      else if (_sortKey === 'trending') {{ va = a.popularity || 0;  vb = b.popularity || 0; }}
+      else if (_sortKey === 'name'){{ va = (a.title_en||'').toLowerCase(); vb = (b.title_en||'').toLowerCase(); }}
+      else if (_sortKey === 'lang') {{
+        const la = a.lang || '', lb = b.lang || '';
+        if (la === 'en' && lb !== 'en') return -1;
+        if (lb === 'en' && la !== 'en') return  1;
+        va = la.toLowerCase(); vb = lb.toLowerCase();
+      }}
+      // Invert numeric sort for high-first keys so ↑ = high/new first
+      const ascending = _invertArrow.has(_sortKey) ? !_sortAsc : _sortAsc;
+      if (va < vb) return ascending ? -1 : 1;
+      if (va > vb) return ascending ?  1 : -1;
+      return 0;
+    }});
+    return arr;
+  }}
+
+  function applySort() {{
+    renderGrid('grid-movie', _sortItems(_rawMovies), 'movie');
+    renderGrid('grid-tv',    _sortItems(_rawTvs),    'tv');
+  }}
+
+  // Sort bar click handling
+  document.querySelectorAll('.sort-btn').forEach(btn => {{
+    btn.addEventListener('click', () => {{
+      const key = btn.dataset.sort;
+      if (_sortKey === key) {{
+        _sortAsc = !_sortAsc;   // same button → flip
+      }} else {{
+        _sortKey = key;
+        _sortAsc = true;        // always default to ↑ on first click
+      }}
+      document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active','asc','desc'));
+      btn.classList.add('active', _sortAsc ? 'asc' : 'desc');
+      applySort();
+    }});
+  }});
+  // Set initial active state: date ↑ = newest first
+  document.querySelector('.sort-btn[data-sort="date"]').classList.add('active','asc');
+
   function renderGrid(gridId, items, kind) {{
     const grid = gv(gridId);
     while (grid.firstChild) grid.removeChild(grid.firstChild);
@@ -2030,11 +2179,7 @@ section{{margin-bottom:48px}}
     const nw      = gv('f-nw').checked;
     const transl  = gv('f-translate').checked;
     const ww      = gv('f-ww').checked;
-
-    if (!q && !yr && !genre) {{
-      gv('fb-status').textContent = 'Enter a query, year, or genre.';
-      return;
-    }}
+    const soon    = gv('f-soon').checked;
 
     gv('loading').style.display = 'block';
     gv('results').style.opacity = '0.4';
@@ -2050,7 +2195,8 @@ section{{margin-bottom:48px}}
       type: type, limit: limit, desc: desc,
       nw: nw ? 'true' : 'false',
       translate: transl ? 'true' : 'false',
-      whole_word: ww ? 'true' : 'false'
+      whole_word: ww ? 'true' : 'false',
+      soon: soon ? 'true' : 'false'
     }});
 
     fetch('/api/search?' + params)
@@ -2058,10 +2204,11 @@ section{{margin-bottom:48px}}
       .then(data => {{
         gv('loading').style.display = 'none';
         gv('results').style.opacity = '1';
-        renderGrid('grid-movie', data.movies, 'movie');
-        renderGrid('grid-tv',    data.tvs,    'tv');
-        gv('count-movie').textContent = (data.movies ? data.movies.length : 0) + ' results';
-        gv('count-tv').textContent    = (data.tvs    ? data.tvs.length    : 0) + ' results';
+        _rawMovies = data.movies || [];
+        _rawTvs    = data.tvs    || [];
+        applySort();
+        gv('count-movie').textContent = _rawMovies.length + ' results';
+        gv('count-tv').textContent    = _rawTvs.length    + ' results';
         const t = data.timing || {{}};
         gv('fb-status').textContent = (data.movies.length + data.tvs.length) + ' results';
         const trCached = t.tr_cached || 0;
@@ -2115,12 +2262,14 @@ section{{margin-bottom:48px}}
     gv('f-desc').value  = '0';
     gv('f-nw').checked  = false;
     gv('f-translate').checked = false;
+    gv('f-soon').checked = false;
     gv('f-ww').checked  = false;
     syncWwState();
-    gv('fb-status').textContent = 'Cleared.';
     gv('fb-timing').textContent = '';
+    doSearch();
   }}
 
+  gv('f-soon').addEventListener('change', doSearch);
   ['f-type','f-year','f-limit','f-desc','f-nw','f-translate','f-ww']
     .forEach(id => {{
       const el = gv(id);
@@ -2272,9 +2421,9 @@ section{{margin-bottom:48px}}
   _tBox.addEventListener('click', function(e) {{ e.stopPropagation(); }});
   document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') closeTrailerModal(); }});
 
-  // Apply direction on load, then run initial search if args were provided
+  // Apply direction on load, then run initial search
   applyDirection();
-  if ('{iq}' || '{iyr}' || '{ign}') doSearch();
+  doSearch();
 }})();
 </script>
 </body>
@@ -2324,11 +2473,12 @@ def run_interactive_server(init_args, watched_set=None) -> None:
                 ww      = bool(q) and p('whole_word') == 'true'
                 lang_str = p('lang')
                 lang_filter = [l.strip() for l in lang_str.split(',') if l.strip()] if lang_str else None
+                show_soon = p('soon') == 'true'
                 result  = run_search(
                     query=q, year=yr, genre_name=gn, limit=lim,
                     movies_only=mo, series_only=so, not_watched=nw,
                     translate=transl, desc_length=desc, watched_set=watched_set,
-                    lang_filter=lang_filter, whole_word=ww,
+                    lang_filter=lang_filter, whole_word=ww, show_soon=show_soon,
                 )
                 t = result['timing']
                 _should_log = t.get('tmdb', 1) != 0.0 or nw  # log TMDB fetches OR unwatched searches
@@ -2390,7 +2540,8 @@ def run_interactive_server(init_args, watched_set=None) -> None:
                                 if _v.get('site') == 'YouTube' and _v.get('type') == 'Trailer':
                                     trailer_key = _v['key']
                                     break
-                            print(f"[trailer] id={tmdb_id} key={trailer_key}")
+                            if trailer_key:
+                                print(f"[trailer] id={tmdb_id} key={trailer_key}")
                         except Exception as _e:
                             print(f"[trailer] ERROR id={tmdb_id}: {_e}")
                     _trailer_cache[_tkey] = trailer_key

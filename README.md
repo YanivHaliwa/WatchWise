@@ -3,28 +3,31 @@
 [![zread](https://img.shields.io/badge/Ask_Zread-_.svg?style=flat&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff)](https://zread.ai/YanivHaliwa/WatchWise)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/YanivHaliwa/WatchWise)
 
-A set of CLI tools to search for movies and TV shows with optional filtering based on your watch history. Integrates with TMDb for media information and Trakt.tv for watch history tracking.
+A CLI tool to search for movies and TV shows with optional filtering based on your watch history. Integrates with TMDb for media information and Trakt.tv for watch history tracking.
 
 ## Features
 
 - 🔍 **Search Movies and TV Shows**: Find content by title or keywords
-- 📺 **Detailed Information**: View release dates, genres, and descriptions
-- 🎬 **Filter by Type**: Search for movies only or TV shows only
+- 🏠 **Browse Latest**: No query needed — launches with the latest releases by default
+- 📺 **Detailed Information**: View release dates, genres, descriptions, and scores
+- 🎬 **Filter by Type**: Movies only or TV shows only
 - ⌛ **Filter by Year**: Find content from a specific release year
 - 🎭 **Filter by Genre**: Browse or search by one or multiple genres (query optional)
 - 🌍 **Filter by Language**: Show only content in specific original languages
 - ✅ **Watch History Integration**: Filter out content you've already watched
+- 🔜 **Coming Soon Control**: Toggle to show or hide upcoming unreleased titles (hidden by default)
 - 🔎 **Description Search**: Find media that matches keywords in descriptions
-- 🏷️ **Genre & Language Badges**: Visual display of genres and original language for each result
-- 🌐 **Hebrew Translation**: Translate titles, descriptions, and genres to Hebrew via `deep_translator` (GoogleTranslator) with persistent disk cache — already-translated strings are served instantly without any network call
-- ⚡ **Smart Caching**: Four cache layers — persistent translation, trailer, and image caches on disk + in-memory TMDB search cache per session. Watched history loads from disk instantly, then syncs Trakt in the background.
-- 🖥️ **Web View**: Display results as a styled dark-theme HTML page opened in Firefox
-- ⚡ **Interactive Mode**: Full in-browser SPA with live filters for type, year, genre, language, and watched status (requires web mode)
-- 🖼️ **Poster Images**: Movie/show cover art displayed inside each result card (interactive mode)
-- 🎬 **YouTube Trailer Modal**: Watch trailers without leaving the page — fullscreen overlay with ESC or click-outside to close (interactive mode)
-- 🛡️ **1 GB Cache Size Guard**: If all disk caches combined exceed 1 GB, they are auto-cleared to free space
+- ⭐ **Rating & Trending Scores**: Each card shows IMDb-style vote average and TMDB popularity score
+- 🗂️ **Sort Bar**: Sort results by Latest / Top Rated / Trending / Name / Language — click again to reverse
+- 🏷️ **Genre & Language Badges**: Visual display of genres and original language per result
+- 🌐 **Hebrew Translation**: Translate titles, descriptions, and genres to Hebrew via `deep_translator` with persistent disk cache
+- ⚡ **Smart Caching**: Four cache layers — persistent translation, trailer, and image caches on disk + in-memory TMDB search cache per session
+- 🖥️ **Web View** (`-w`): Display results as a static styled dark-theme HTML page opened in Firefox
+- 🚀 **Interactive Mode** (`-i`): Full in-browser live server — no `-w` needed, `-i` implies it
+- 🖼️ **Poster Images**: Movie/show cover art displayed inside each result card
+- 🎬 **YouTube Trailer Modal**: Watch trailers without leaving the page — fullscreen overlay, ESC or click-outside to close
+- 🛡️ **1 GB Cache Size Guard**: Disk caches auto-cleared if combined size exceeds 1 GB
 - 📊 **Relevance Scoring**: Results ranked by how closely they match your query
-- 🔜 **Coming Soon Badges**: Upcoming releases are automatically labeled in web view
 
 
 ## Screenshots
@@ -136,18 +139,20 @@ Translate results to Hebrew:
 python WatchSearch.py -t "Inception"
 ```
 
-Open results in a styled web page:
+Open results in a static styled web page:
 
 ```bash
 python WatchSearch.py -w "Inception"
 ```
 
-Open interactive browser UI (live filters, no page reload):
+Launch the live interactive server:
 
 ```bash
-python WatchSearch.py -w -i "Inception"
-python WatchSearch.py -w -i              # launch blank interactive mode
+python WatchSearch.py -i              # browse latest releases (no query needed)
+python WatchSearch.py -i "Inception"  # start with a query pre-filled
 ```
+
+> **Note**: `-i` no longer requires `-w`. It implies web mode automatically.
 
 Clear all persistent caches (translation, trailer, images, watched):
 
@@ -160,6 +165,39 @@ Enable debug output:
 ```bash
 python WatchSearch.py --debug "Matrix"
 ```
+
+### Interactive Mode (`-i`)
+
+The interactive server opens in Firefox and provides a live filter panel that re-searches automatically as you change options:
+
+| Control | Description |
+|---------|-------------|
+| **Query** | Title or keyword search |
+| **Type** | All / Movies / TV Series |
+| **Year** | Filter by release year |
+| **Genre** | Multi-select genre dropdown |
+| **Language** | Multi-select language dropdown |
+| **Limit** | Max results per section (default 20) |
+| **Desc chars** | Characters of description to show |
+| **Unwatched** | Hide titles you've already watched |
+| **Hebrew** | Translate results to Hebrew |
+| **Soon** | Show upcoming unreleased titles (off by default — limit is always filled from released titles) |
+
+**Sort bar** (always visible, sticky):
+
+| Button | ↑ | ↓ |
+|--------|---|---|
+| 📅 Latest | Newest first | Oldest first |
+| ⭐ Top Rated | Highest rating first | Lowest first |
+| 🔥 Trending | Most popular first | Least popular first |
+| 🔤 Name | A → Z (English title) | Z → A |
+| 🌐 Language | English first, then A–Z | Reversed |
+
+Each result card shows:
+- Poster image, title, release date
+- Genre and language badges
+- ⭐ Rating score and 🔥 Trending score
+- ▶ Trailer button (opens YouTube in a fullscreen overlay)
 
 ### Check Watch History
 
@@ -219,8 +257,6 @@ WatchWise uses four cache layers to keep things fast:
 
 ### Translation Cache (`.trans_cache.json`)
 
-Translations are stored in `.trans_cache.json` in the project directory.
-
 - Loaded automatically at startup
 - Auto-saved to disk on exit and after every batch translate
 - Parallel batch translation via `deep_translator` (`GoogleTranslator`) — up to 10 concurrent threads
@@ -229,14 +265,12 @@ Translations are stored in `.trans_cache.json` in the project directory.
 
 ### Watched Titles Cache (`.watched_cache.json`)
 
-Your Trakt.tv watch history is saved to `.watched_cache.json` in the project directory.
-
 Two-phase load for instant startup:
 
-- **Phase 1**: Loads from `.watched_cache.json` instantly on startup (non-blocking) — watched badges appear immediately
-- **Phase 2**: Trakt sync runs in a background thread, merges any new titles, and saves back to disk — new titles from Trakt appear after background sync completes
+- **Phase 1**: Loads from `.watched_cache.json` instantly on startup — watched badges appear immediately
+- **Phase 2**: Trakt sync runs in a background thread, merges new titles, saves back to disk
 
-Force a full refresh with `watched.py`:
+Force a full refresh:
 
 ```bash
 python watched.py -r
@@ -244,15 +278,11 @@ python watched.py -r
 
 ### Trailer Cache (`.trailer_cache.json`)
 
-YouTube trailer keys are stored in `.trailer_cache.json` in the project directory.
-
 - Maps TMDB ID → YouTube trailer key
 - Persists across restarts — no re-fetching for movies already seen
-- Populated on demand when you click ▶ Trailer in interactive mode
+- Populated on demand when you click ▶ Trailer
 
 ### Image Cache (`.image_cache/`)
-
-Poster image files are stored in the `.image_cache/` directory.
 
 - MD5-named files, approximately 15 KB each
 - Three-tier lookup: memory → disk → TMDB network
@@ -260,17 +290,13 @@ Poster image files are stored in the `.image_cache/` directory.
 
 ### TMDB Search Cache (In-Memory)
 
-TMDB search results are cached in memory for the duration of the session.
-
 - Keyed by query, year, genre, limit, and description length
-- Repeat searches with the same parameters hit the cache instantly instead of re-querying TMDB
-- Especially useful in interactive mode (`-w -i`) where you may search the same term multiple times
+- Repeat searches with the same parameters hit the cache instantly
+- Especially useful in interactive mode where filters change frequently
 
 ### Cache Size Limit
 
-All four disk caches (translation, watched, trailer, images) share a **1 GB combined size limit**.
-
-When the limit is reached, all disk caches are auto-cleared automatically to free space. You can also clear all caches manually:
+All four disk caches share a **1 GB combined size limit**. When reached, all disk caches are auto-cleared. Manual clear:
 
 ```bash
 python WatchSearch.py --clear-cache
