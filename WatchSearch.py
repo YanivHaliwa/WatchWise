@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-from tmdbv3api import TMDb, Movie, TV, Genre
+from tmdbv3api import TMDb, Movie, TV, Genre, Search
 import sys
 import os
 import argparse
+import json as _json
 import webbrowser
 import subprocess
 import time as _startup_timer
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 # Import the watched script functionality
 try:
@@ -33,7 +38,7 @@ DEBUG = False
 
 # ── Persistent translation cache ──────────────────────────────────────────────
 # Translations never change, so we persist them to disk across all sessions.
-_TRANS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.trans_cache.json')
+_TRANS_CACHE_FILE = os.path.join(SCRIPT_DIR, '.trans_cache.json')
 
 def _load_trans_cache() -> dict:
     try:
@@ -60,7 +65,32 @@ import atexit as _atexit
 _atexit.register(lambda: _save_trans_cache(_trans_cache))  # auto-save on exit
 
 # ── Persistent watched cache (survives restarts; Trakt syncs in background) ──
-_WATCHED_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.watched_cache.json')
+_WATCHED_CACHE_FILE = os.path.join(SCRIPT_DIR, '.watched_cache.json')
+_RECENT_LANGS_FILE = os.path.join(SCRIPT_DIR, '.recent_langs.json')
+_RECENT_LANGS_MAX = 5
+
+def _load_recent_langs() -> list:
+    """Load recent language selections from disk."""
+    try:
+        with open(_RECENT_LANGS_FILE, 'r') as f:
+            data = _json.loads(f.read())
+            return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _save_recent_langs(langs: list):
+    """Save recent language selections, most recent first, capped at _RECENT_LANGS_MAX."""
+    try:
+        existing = _load_recent_langs()
+        for l in reversed(langs):
+            if l in existing:
+                existing.remove(l)
+            existing.insert(0, l)
+        existing = existing[:_RECENT_LANGS_MAX]
+        with open(_RECENT_LANGS_FILE, 'w') as f:
+            f.write(_json.dumps(existing, ensure_ascii=False))
+    except Exception:
+        pass
 
 def _load_watched_file() -> set:
     """Load watched titles from disk cache (fast, no network)."""
@@ -75,14 +105,19 @@ def _save_watched_file(titles: set) -> None:
     """Persist watched titles to disk cache."""
     try:
         import json as _j, datetime as _dt
+        _now = _dt.datetime.now()
         with open(_WATCHED_CACHE_FILE, 'w', encoding='utf-8') as f:
-            _j.dump({'titles': sorted(titles), 'updated': _dt.datetime.now().isoformat()}, f)
+            _j.dump({
+                'titles': sorted(titles),
+                'ts': _now.timestamp(),
+                'updated': _now.isoformat(),
+            }, f)
     except Exception:
         pass
 
 # ── Persistent trailer cache ──────────────────────────────────────────────────
-_TRAILER_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.trailer_cache.json')
-_IMAGE_CACHE_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.image_cache')
+_TRAILER_CACHE_FILE = os.path.join(SCRIPT_DIR, '.trailer_cache.json')
+_IMAGE_CACHE_DIR    = os.path.join(SCRIPT_DIR, '.image_cache')
 
 def _load_trailer_file() -> dict:
     """Load trailer keys from disk cache."""
@@ -162,6 +197,8 @@ def _auto_clear_if_over_limit() -> bool:
 
 # ── In-memory search cache (current session only — TMDB results can change) ───
 _search_cache: dict = {}  # (query, year, genre, limit, desc_length) → {movies:[...], tvs:[...]}
+_tmdb_year_cache: dict = {}  # (query, year, 'movie'|'tv') → list of raw dicts
+_actor_credits_cache: dict = {}  # actor_name_lower → {movies: [...], tvs: [...]}
 
 # ISO 639-1 → full language name (for badge display + --lang filter)
 _LANG_NAMES: dict = {
@@ -413,6 +450,8 @@ def parse_arguments():
             cleared.append("translation (already empty)")
         n = len(_search_cache)
         _search_cache.clear()
+        _tmdb_year_cache.clear()
+        _actor_credits_cache.clear()
         cleared.append(f"search ({n} entries)")
         import shutil as _shutil
         if os.path.exists(_TRAILER_CACHE_FILE):
@@ -680,102 +719,52 @@ def search_in_description(query, is_movie=True, limit=15, year_filter=None, whol
     found_in_description = []
     
     try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         # Convert query to lowercase for case-insensitive matching
         query_lower = query.lower()
         # Split the query into individual words for better matching
         query_words = query_lower.split()
-        
-        # Instead of just searching predefined lists, also search directly for the term
-        api_search_results = []
+
+        # Build list of callables to run concurrently
+        fetch_tasks = []
         if is_movie:
-            # First, search for more movies directly (this will help find matching descriptions)
-            try:
-                # Get at least 5 pages of results to search more thoroughly
-                for page in range(1, 6):
-                    search_results = movie.search(query, page=page)
-                    if search_results:
-                        api_search_results.extend(search_results)
-            except Exception as e:
-                if DEBUG:
-                    print(f"Error in direct movie search: {e}")
-                
-            # Get a larger set of movies to search through - more pages for more thorough search
-            sources = [
-                movie.popular(page=1),
-                movie.popular(page=2),
-                movie.popular(page=3),
-                movie.top_rated(page=1),
-                movie.top_rated(page=2),
-                movie.top_rated(page=3),
-                movie.now_playing(page=1),
-                movie.now_playing(page=2)
-            ]
-            
-            # Try to get upcoming movies if available
-            try:
-                sources.append(movie.upcoming(page=1))
-                sources.append(movie.upcoming(page=2))
-            except:
-                pass
-            
-            # If year filter is specified, also search for movies from that year specifically
+            # 5 pages of direct search
+            for page in range(1, 6):
+                fetch_tasks.append(lambda p=page: movie.search(query, page=p))
+            # Popular / top_rated / now_playing
+            for p in range(1, 4):
+                fetch_tasks.append(lambda pg=p: movie.popular(page=pg))
+                fetch_tasks.append(lambda pg=p: movie.top_rated(page=pg))
+            for p in range(1, 3):
+                fetch_tasks.append(lambda pg=p: movie.now_playing(page=pg))
+                fetch_tasks.append(lambda pg=p: movie.upcoming(page=pg))
             if year_filter:
-                try:
-                    year_results = _tmdb_discover(is_movie=True, primary_release_year=year_filter)
-                    sources.append(year_results)
-                    if DEBUG:
-                        print(f"Added {len(year_results)} movies from year {year_filter}")
-                except Exception as e:
-                    if DEBUG:
-                        print(f"Error fetching movies from year {year_filter}: {e}")
-                
+                fetch_tasks.append(lambda: _tmdb_discover(is_movie=True, primary_release_year=year_filter))
         else:
-            # First, search for more TV shows directly
-            try:
-                # Get at least 5 pages of results
-                for page in range(1, 6):
-                    search_results = tv.search(query, page=page)
-                    if search_results:
-                        api_search_results.extend(search_results)
-            except Exception as e:
-                if DEBUG:
-                    print(f"Error in direct TV search: {e}")
-                
-            # For TV shows, get multiple pages of results for a deeper search
-            sources = [
-                tv.popular(page=1),
-                tv.popular(page=2),
-                tv.popular(page=3),
-                tv.top_rated(page=1),
-                tv.top_rated(page=2),
-                tv.top_rated(page=3),
-                tv.on_the_air(page=1),
-                tv.on_the_air(page=2)
-            ]
-            
-            # Try to get airing today if available
-            try:
-                sources.append(tv.airing_today(page=1))
-                sources.append(tv.airing_today(page=2))
-            except:
-                pass
-            
-            # If year filter is specified, also search for TV shows from that year
+            # 5 pages of direct search
+            for page in range(1, 6):
+                fetch_tasks.append(lambda p=page: tv.search(query, page=p))
+            # Popular / top_rated / on_the_air
+            for p in range(1, 4):
+                fetch_tasks.append(lambda pg=p: tv.popular(page=pg))
+                fetch_tasks.append(lambda pg=p: tv.top_rated(page=pg))
+            for p in range(1, 3):
+                fetch_tasks.append(lambda pg=p: tv.on_the_air(page=pg))
+                fetch_tasks.append(lambda pg=p: tv.airing_today(page=pg))
             if year_filter:
+                fetch_tasks.append(lambda: _tmdb_discover(is_movie=False, first_air_date_year=year_filter))
+
+        # Run all API calls concurrently
+        all_results = []
+        with ThreadPoolExecutor(max_workers=15) as pool:
+            futures = [pool.submit(fn) for fn in fetch_tasks]
+            for f in as_completed(futures):
                 try:
-                    # For TV shows, we'll use first_air_date_year parameter
-                    year_results = _tmdb_discover(is_movie=False, first_air_date_year=year_filter)
-                    sources.append(year_results)
-                    if DEBUG:
-                        print(f"Added {len(year_results)} TV shows from year {year_filter}")
-                except Exception as e:
-                    if DEBUG:
-                        print(f"Error fetching TV shows from year {year_filter}: {e}")
-        
-        # Combine all sources for searching
-        all_results = api_search_results.copy()  # Start with the direct search results
-        for source in sources:
-            all_results.extend(source)
+                    result = f.result()
+                    if result:
+                        all_results.extend(result)
+                except Exception:
+                    pass
             
         # Remove duplicates by ID
         unique_ids = set()
@@ -1288,6 +1277,7 @@ section {{ margin-bottom: 52px; }}
   letter-spacing: .3px;
 }}
 .fchip-query  {{ background: #1c1200; color: #fbbf24; border: 1.5px solid #92400e; }}
+.fchip-actor  {{ background: #1a0022; color: #e879f9; border: 1.5px solid #6b21a8; }}
 .fchip-year   {{ background: #0a1a30; color: #60a5fa; border: 1.5px solid #1e3a5f; }}
 .fchip-genre  {{ background: #160d2e; color: #c084fc; border: 1.5px solid #3b1f6e; }}
 .fchip-nw     {{ background: #1a0d00; color: #fb923c; border: 1.5px solid #7c2d00; }}
@@ -1412,6 +1402,38 @@ def _resolve_multi_genre(genre_csv: str, is_movie: bool):
     return ids, param
 
 
+def _fetch_actor_credits(actor_name: str) -> dict:
+    """Search TMDB for an actor by name, return their movie + TV credits as raw dicts.
+    Returns {movies: [dict, ...], tvs: [dict, ...]}. Cached in _actor_credits_cache."""
+    import requests as _rq
+    _key = actor_name.strip().lower()
+    if _key in _actor_credits_cache:
+        return _actor_credits_cache[_key]
+    _api_key = os.getenv("TMDB_API_KEY", "")
+    # Step 1: search for the person
+    _p_url = "https://api.themoviedb.org/3/search/person"
+    try:
+        _resp = _rq.get(_p_url, params={"api_key": _api_key, "query": actor_name, "language": "en-US"}, timeout=10).json()
+        results = _resp.get("results", [])
+        if not results:
+            _actor_credits_cache[_key] = {"movies": [], "tvs": []}
+            return _actor_credits_cache[_key]
+        person_id = results[0]["id"]
+    except Exception:
+        return {"movies": [], "tvs": []}
+    # Step 2: get combined credits
+    _c_url = f"https://api.themoviedb.org/3/person/{person_id}/combined_credits"
+    try:
+        _cred = _rq.get(_c_url, params={"api_key": _api_key, "language": "en-US"}, timeout=10).json()
+        cast = _cred.get("cast", [])
+        movies = [c for c in cast if c.get("media_type") == "movie"]
+        tvs = [c for c in cast if c.get("media_type") == "tv"]
+        _actor_credits_cache[_key] = {"movies": movies, "tvs": tvs}
+        return _actor_credits_cache[_key]
+    except Exception:
+        return {"movies": [], "tvs": []}
+
+
 def run_search(
     query: str,
     year,
@@ -1426,11 +1448,14 @@ def run_search(
     lang_filter=None,  # list of full language names (case-insensitive)
     whole_word: bool = False,
     show_soon: bool = False,
+    search_desc: bool = False,
+    actor: str = '',
 ) -> dict:
     """Re-run TMDB search with given parameters. Returns {movies, tvs, timing}."""
     import time as _t
     import datetime as _dt
     import copy as _copy
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     if watched_set is None:
         watched_set = set()
     today = _dt.date.today().isoformat()
@@ -1514,7 +1539,7 @@ def run_search(
     # ── Search cache check ─────────────────────────────────────────────────────
     _t_start = _t.time()
     _lang_key = tuple(sorted(l.lower() for l in lang_filter)) if lang_filter else ()
-    _cache_key = (query or '', year or '', genre_name or '', limit, desc_length, _lang_key)
+    _cache_key = (query or '', year or '', genre_name or '', limit, desc_length, _lang_key, search_desc, whole_word, show_soon, actor.strip().lower() if actor else '')
     _cache_hit = _cache_key in _search_cache
     if _cache_hit:
         cached = _search_cache[_cache_key]
@@ -1524,11 +1549,25 @@ def run_search(
 
     # ── Movies + TV TMDB fetch (skipped on cache hit) ─────────────────────────
     _t_tmdb = _t.time()
-    if not _cache_hit and not series_only:
-        t0 = _t.time()
+
+    def _fetch_movies():
+        """Fetch movie results (runs in thread)."""
+        items = []
         mgid_list, mgid_param = _resolve_multi_genre(genre_name, is_movie=True)
-        if not query:
-            _browse_lim = limit if show_soon else limit * 3  # fetch extra to compensate for future filtering
+        if not query and actor:
+            # Actor-only search: use actor credits as primary
+            _acred_only = _fetch_actor_credits(actor)
+            _a_raw = _acred_only.get("movies", [])
+            if year:
+                _a_raw = [m for m in _a_raw if str(m.get("release_date", ""))[:4] == str(year)]
+            class _RA_only:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            primary = [_RA_only(d) for d in _a_raw]
+            secondary = []
+        elif not query:
+            _browse_lim = limit if show_soon else limit * 3
             primary = browse_by_genre_year(genre_id=mgid_param, year=year, is_movie=True, limit=_browse_lim, lang_code=_browse_lang_code,
                                            date_lte=None if show_soon else today)
             secondary = []
@@ -1544,30 +1583,112 @@ def run_search(
                     or (r.overview and ql in r.overview.lower()))]
             except Exception:
                 primary = []
-            reg = movie.search(query)
+            _yr_key = (query.lower(), year, 'movie')
+            if _yr_key in _tmdb_year_cache:
+                _p1_items = _tmdb_year_cache[_yr_key]
+            else:
+                import requests as _rq
+                _api_key = os.getenv("TMDB_API_KEY", "")
+                _s_url = "https://api.themoviedb.org/3/search/movie"
+                _s_params = {"api_key": _api_key, "query": query, "primary_release_year": year, "language": "en-US"}
+                try:
+                    _p1 = _rq.get(_s_url, params={**_s_params, "page": 1}, timeout=10).json()
+                    _p1_items = _p1.get("results", [])
+                    _total_pages = min(_p1.get("total_pages", 1), 50)
+                except Exception:
+                    _p1_items, _total_pages = [], 0
+                if _total_pages > 1:
+                    def _fetch_page(p):
+                        try:
+                            return _rq.get(_s_url, params={**_s_params, "page": p}, timeout=10).json().get("results", [])
+                        except Exception:
+                            return []
+                    with ThreadPoolExecutor(max_workers=10) as _pool:
+                        _rest = list(_pool.map(_fetch_page, range(2, _total_pages + 1)))
+                    for batch in _rest:
+                        _p1_items.extend(batch)
+                _tmdb_year_cache[_yr_key] = _p1_items
             seen_ids = {r.id for r in primary if hasattr(r,'id')}
-            for r in reg:
-                if hasattr(r,'release_date') and r.release_date:
-                    try:
-                        if int(r.release_date.split('-')[0]) == year and r.id not in seen_ids:
-                            primary.append(r)
-                    except (ValueError, IndexError):
-                        pass
-            secondary = search_in_description(query, is_movie=True, limit=limit, year_filter=year, whole_word=whole_word) if query else []
+            class _R:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            for d in _p1_items:
+                rid = d.get("id")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    primary.append(_R(d))
+            secondary = search_in_description(query, is_movie=True, limit=limit, year_filter=year, whole_word=whole_word) if (query and search_desc) else []
         else:
-            primary   = movie.search(query)
-            secondary = search_in_description(query, is_movie=True, limit=limit, year_filter=None, whole_word=whole_word) if query else []
+            _nyr_key = (query.lower(), None, 'movie')
+            if _nyr_key in _tmdb_year_cache:
+                _nyr_items = _tmdb_year_cache[_nyr_key]
+            else:
+                import requests as _rq_nyr
+                _api_key_nyr = os.getenv("TMDB_API_KEY", "")
+                _s_url_nyr = "https://api.themoviedb.org/3/search/movie"
+                _s_params_nyr = {"api_key": _api_key_nyr, "query": query, "language": "en-US"}
+                try:
+                    _p1_nyr = _rq_nyr.get(_s_url_nyr, params={**_s_params_nyr, "page": 1}, timeout=10).json()
+                    _nyr_items = _p1_nyr.get("results", [])
+                    _tp_nyr = min(_p1_nyr.get("total_pages", 1), 50)
+                except Exception:
+                    _nyr_items, _tp_nyr = [], 0
+                if _tp_nyr > 1:
+                    def _fetch_nyr(p):
+                        try:
+                            return _rq_nyr.get(_s_url_nyr, params={**_s_params_nyr, "page": p}, timeout=10).json().get("results", [])
+                        except Exception:
+                            return []
+                    with ThreadPoolExecutor(max_workers=10) as _pool_nyr:
+                        for batch in _pool_nyr.map(_fetch_nyr, range(2, _tp_nyr + 1)):
+                            _nyr_items.extend(batch)
+                _tmdb_year_cache[_nyr_key] = _nyr_items
+            class _R_nyr:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            primary = [_R_nyr(d) for d in _nyr_items]
+            secondary = search_in_description(query, is_movie=True, limit=limit, year_filter=None, whole_word=whole_word) if (query and search_desc) else []
+        # ── Merge actor credits (movies) ──────────────────────────────────
+        if actor:
+            _acred = _fetch_actor_credits(actor)
+            _a_movies = _acred.get("movies", [])
+            if year:
+                _a_movies = [m for m in _a_movies if str(m.get("release_date", ""))[:4] == str(year)]
+            _seen_pri = {getattr(r, 'id', None) for r in primary if hasattr(r, 'id')}
+            _seen_pri |= {getattr(r, 'id', None) for r in secondary if hasattr(r, 'id')}
+            class _RA:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            for am in _a_movies:
+                if am.get("id") not in _seen_pri:
+                    _seen_pri.add(am["id"])
+                    primary.append(_RA(am))
         for r in _combine(primary, secondary, mgid_list, True):
             d = _proc_item(r, True)
             if d:
-                movie_items.append(d)
-        timing['_tmdb_movie'] = round(_t.time() - t0, 2)
+                items.append(d)
+        return items
 
-    # ── TV (skipped on cache hit) ──────────────────────────────────────────────
-    if not _cache_hit and not movies_only:
-        t0 = _t.time()
+    def _fetch_tv():
+        """Fetch TV results (runs in thread)."""
+        items = []
         tgid_list, tgid_param = _resolve_multi_genre(genre_name, is_movie=False)
-        if not query:
+        if not query and actor:
+            # Actor-only search: use actor credits as primary
+            _acred_tv_only = _fetch_actor_credits(actor)
+            _a_tv_raw = _acred_tv_only.get("tvs", [])
+            if year:
+                _a_tv_raw = [t for t in _a_tv_raw if str(t.get("first_air_date", ""))[:4] == str(year)]
+            class _RA_tv_only:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            primary = [_RA_tv_only(d) for d in _a_tv_raw]
+            secondary = []
+        elif not query:
             _browse_lim_tv = limit if show_soon else limit * 3
             primary = browse_by_genre_year(genre_id=tgid_param, year=year, is_movie=False, limit=_browse_lim_tv, lang_code=_browse_lang_code,
                                            date_lte=None if show_soon else today)
@@ -1584,24 +1705,113 @@ def run_search(
                     or (r.overview and ql in r.overview.lower()))]
             except Exception:
                 primary = []
-            reg = tv.search(query)
+            _yr_key_tv = (query.lower(), year, 'tv')
+            if _yr_key_tv in _tmdb_year_cache:
+                _p1_tv_items = _tmdb_year_cache[_yr_key_tv]
+            else:
+                import requests as _rq_tv
+                _api_key_tv = os.getenv("TMDB_API_KEY", "")
+                _s_url_tv = "https://api.themoviedb.org/3/search/tv"
+                _s_params_tv = {"api_key": _api_key_tv, "query": query, "first_air_date_year": year, "language": "en-US"}
+                try:
+                    _p1_tv = _rq_tv.get(_s_url_tv, params={**_s_params_tv, "page": 1}, timeout=10).json()
+                    _p1_tv_items = _p1_tv.get("results", [])
+                    _total_pages_tv = min(_p1_tv.get("total_pages", 1), 50)
+                except Exception:
+                    _p1_tv_items, _total_pages_tv = [], 0
+                if _total_pages_tv > 1:
+                    def _fetch_tv_page(p):
+                        try:
+                            return _rq_tv.get(_s_url_tv, params={**_s_params_tv, "page": p}, timeout=10).json().get("results", [])
+                        except Exception:
+                            return []
+                    with ThreadPoolExecutor(max_workers=10) as _pool_tv:
+                        _rest_tv = list(_pool_tv.map(_fetch_tv_page, range(2, _total_pages_tv + 1)))
+                    for batch in _rest_tv:
+                        _p1_tv_items.extend(batch)
+                _tmdb_year_cache[_yr_key_tv] = _p1_tv_items
             seen_ids = {r.id for r in primary if hasattr(r,'id')}
-            for r in reg:
-                if hasattr(r,'first_air_date') and r.first_air_date:
-                    try:
-                        if int(r.first_air_date.split('-')[0]) == year and r.id not in seen_ids:
-                            primary.append(r)
-                    except (ValueError, IndexError):
-                        pass
-            secondary = search_in_description(query, is_movie=False, limit=limit, year_filter=year, whole_word=whole_word) if query else []
+            class _R_tv:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            for d in _p1_tv_items:
+                rid = d.get("id")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    primary.append(_R_tv(d))
+            secondary = search_in_description(query, is_movie=False, limit=limit, year_filter=year, whole_word=whole_word) if (query and search_desc) else []
         else:
-            primary   = tv.search(query)
-            secondary = search_in_description(query, is_movie=False, limit=limit, year_filter=None, whole_word=whole_word) if query else []
+            _nyr_key_tv = (query.lower(), None, 'tv')
+            if _nyr_key_tv in _tmdb_year_cache:
+                _nyr_tv_items = _tmdb_year_cache[_nyr_key_tv]
+            else:
+                import requests as _rq_nyr_tv
+                _api_key_nyr_tv = os.getenv("TMDB_API_KEY", "")
+                _s_url_nyr_tv = "https://api.themoviedb.org/3/search/tv"
+                _s_params_nyr_tv = {"api_key": _api_key_nyr_tv, "query": query, "language": "en-US"}
+                try:
+                    _p1_nyr_tv = _rq_nyr_tv.get(_s_url_nyr_tv, params={**_s_params_nyr_tv, "page": 1}, timeout=10).json()
+                    _nyr_tv_items = _p1_nyr_tv.get("results", [])
+                    _tp_nyr_tv = min(_p1_nyr_tv.get("total_pages", 1), 50)
+                except Exception:
+                    _nyr_tv_items, _tp_nyr_tv = [], 0
+                if _tp_nyr_tv > 1:
+                    def _fetch_nyr_tv(p):
+                        try:
+                            return _rq_nyr_tv.get(_s_url_nyr_tv, params={**_s_params_nyr_tv, "page": p}, timeout=10).json().get("results", [])
+                        except Exception:
+                            return []
+                    with ThreadPoolExecutor(max_workers=10) as _pool_nyr_tv:
+                        for batch in _pool_nyr_tv.map(_fetch_nyr_tv, range(2, _tp_nyr_tv + 1)):
+                            _nyr_tv_items.extend(batch)
+                _tmdb_year_cache[_nyr_key_tv] = _nyr_tv_items
+            class _R_nyr_tv:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            primary = [_R_nyr_tv(d) for d in _nyr_tv_items]
+            secondary = search_in_description(query, is_movie=False, limit=limit, year_filter=None, whole_word=whole_word) if (query and search_desc) else []
+        # ── Merge actor credits (TV) ─────────────────────────────────────
+        if actor:
+            _acred_tv = _fetch_actor_credits(actor)
+            _a_tvs = _acred_tv.get("tvs", [])
+            if year:
+                _a_tvs = [t for t in _a_tvs if str(t.get("first_air_date", ""))[:4] == str(year)]
+            _seen_pri_tv = {getattr(r, 'id', None) for r in primary if hasattr(r, 'id')}
+            _seen_pri_tv |= {getattr(r, 'id', None) for r in secondary if hasattr(r, 'id')}
+            class _RA_tv:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            for at in _a_tvs:
+                if at.get("id") not in _seen_pri_tv:
+                    _seen_pri_tv.add(at["id"])
+                    primary.append(_RA_tv(at))
         for r in _combine(primary, secondary, tgid_list, False):
             d = _proc_item(r, False)
             if d:
-                tv_items.append(d)
-        timing['_tmdb_tv'] = round(_t.time() - t0, 2)
+                items.append(d)
+        return items
+
+    # Run movie + TV searches in parallel
+    if not _cache_hit:
+        _do_movies = not series_only
+        _do_tv = not movies_only
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {}
+            if _do_movies:
+                futures['movie'] = pool.submit(_fetch_movies)
+            if _do_tv:
+                futures['tv'] = pool.submit(_fetch_tv)
+            t0 = _t.time()
+            if 'movie' in futures:
+                movie_items = futures['movie'].result()
+            timing['_tmdb_movie'] = round(_t.time() - t0, 2) if _do_movies else 0.0
+            t0_tv = _t.time()
+            if 'tv' in futures:
+                tv_items = futures['tv'].result()
+            timing['_tmdb_tv'] = round(_t.time() - t0_tv, 2) if _do_tv else 0.0
 
     # ── Filter future releases if show_soon is False ──────────────────────────
     if not show_soon:
@@ -1764,12 +1974,13 @@ header h1{{font-size:1.5rem;color:#a78bfa;font-weight:800}}
 .fb-group label{{font-size:.72rem;color:#6b7280;font-weight:600}}
 .fb-group input,.fb-group select{{
   background:#111827;color:#e2e8f0;border:1px solid #2d3748;
-  border-radius:6px;padding:5px 9px;font-size:.84rem;outline:none;min-width:88px}}
+  border-radius:6px;padding:5px 7px;font-size:.82rem;outline:none;min-width:70px}}
 .fb-group input:focus,.fb-group select:focus{{border-color:#7c3aed}}
 .genre-dd{{position:relative;display:inline-block}}
 .genre-btn{{background:#111827;color:#e2e8f0;border:1px solid #2d3748;border-radius:6px;
-  padding:5px 9px;font-size:.84rem;min-width:130px;cursor:pointer;text-align:left;
+  padding:5px 7px;font-size:.82rem;min-width:100px;cursor:pointer;text-align:left;
   display:block;width:100%}}
+.genre-btn.btn-narrow{{min-width:auto;width:auto;padding-right:20px}}
 .genre-btn:focus{{border-color:#7c3aed;outline:none}}
 .genre-panel{{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:500;
   background:#0e1422;border:1px solid #3b2a6e;border-radius:8px;padding:6px 4px;
@@ -1778,6 +1989,13 @@ header h1{{font-size:1.5rem;color:#a78bfa;font-weight:800}}
   border-radius:4px;cursor:pointer;font-size:.84rem;color:#e2e8f0;white-space:nowrap}}
 .genre-panel label:hover{{background:#1a1035}}
 .genre-panel input[type=checkbox]{{accent-color:#7c3aed;cursor:pointer;flex-shrink:0}}
+.lang-section-hdr{{font-size:.7rem;font-weight:700;color:#7c3aed;text-transform:uppercase;
+  letter-spacing:.08em;padding:4px 10px 2px;opacity:.7}}
+.lang-section-sep{{border:0;border-top:1px solid #2d3748;margin:4px 8px}}
+.singlesel-panel .ss-item{{display:block;padding:4px 10px;border-radius:4px;cursor:pointer;
+  font-size:.82rem;color:#e2e8f0;white-space:nowrap}}
+.singlesel-panel .ss-item:hover{{background:#1a1035}}
+.singlesel-panel .ss-item.ss-active{{color:#a78bfa;font-weight:700}}
 .fb-check{{display:flex;align-items:flex-end;padding:0}}
 .fb-check label{{
   display:inline-flex;align-items:center;gap:6px;cursor:pointer;
@@ -1804,6 +2022,7 @@ section{{margin-bottom:48px}}
 .fchip{{display:inline-flex;align-items:center;font-size:.95rem;font-weight:700;
   padding:4px 13px;border-radius:20px}}
 .fchip-query{{background:#1c1200;color:#fbbf24;border:1.5px solid #92400e}}
+.fchip-actor{{background:#1a0022;color:#e879f9;border:1.5px solid #6b21a8}}
 .fchip-year{{background:#0a1a30;color:#60a5fa;border:1.5px solid #1e3a5f}}
 .fchip-genre{{background:#160d2e;color:#c084fc;border:1.5px solid #3b1f6e}}
 .fchip-nw{{background:#1a0d00;color:#fb923c;border:1.5px solid #7c2d00}}
@@ -1900,22 +2119,31 @@ section{{margin-bottom:48px}}
       <label>Query</label>
       <input id="f-query" type="text" placeholder="title or keywords" value="{iq}">
     </div>
+    <div class="fb-group">
+      <label>Actor</label>
+      <input id="f-actor" type="text" placeholder="actor name" value="">
+    </div>
     <div class="fb-group fb-check">
-      <label id="f-ww-label" style="opacity:.35;pointer-events:none"><input id="f-ww" type="checkbox" disabled> Whole Word</label>
+      <label id="f-ww-label" style="opacity:.35;pointer-events:none"><input id="f-ww" type="checkbox" disabled> Exact</label>
+    </div>
+    <div class="fb-group fb-check">
+      <label id="f-sd-label" style="opacity:.35;pointer-events:none"><input id="f-sd" type="checkbox" disabled> Desc</label>
     </div>
     <div class="fb-group">
       <label>Type</label>
-      <select id="f-type">
-        <option value="all"{"  selected" if ity=="all" else ""}>All</option>
-        <option value="movie"{"  selected" if ity=="movie" else ""}>Movies</option>
-        <option value="tv"{"  selected" if ity=="tv" else ""}>TV Series</option>
-      </select>
+      <input type="hidden" id="f-type" value="{ity}">
+      <div class="genre-dd" id="type-dd">
+        <button type="button" class="genre-btn btn-narrow" id="type-btn">{"All" if ity=="all" else "Movies" if ity=="movie" else "TV Series"} ▾</button>
+        <div class="genre-panel singlesel-panel" id="type-panel"></div>
+      </div>
     </div>
     <div class="fb-group">
       <label>Year</label>
-      <select id="f-year" style="width:110px">
-        {year_opts}
-      </select>
+      <input type="hidden" id="f-year" value="{iyr}">
+      <div class="genre-dd" id="year-dd">
+        <button type="button" class="genre-btn btn-narrow" id="year-btn">{"Any Year" if not iyr else iyr} ▾</button>
+        <div class="genre-panel singlesel-panel" id="year-panel"></div>
+      </div>
     </div>
     <div class="fb-group">
       <label>Genre</label>
@@ -2003,9 +2231,10 @@ section{{margin-bottom:48px}}
     return el;
   }}
 
-  function buildChips(q, yr, genre, nw, translate, lang) {{
+  function buildChips(q, actor, yr, genre, nw, translate, lang) {{
     const chips = [];
     if (q)       chips.push(['fchip fchip-query',  '🔍 ' + q]);
+    if (actor)   chips.push(['fchip fchip-actor',  '🎭 ' + actor]);
     if (yr)      chips.push(['fchip fchip-year',   '📅 ' + yr]);
     if (genre)   chips.push(['fchip fchip-genre',  '🎭 ' + genre]);
     if (lang)    chips.push(['fchip fchip-lang',   '🌍 ' + lang]);
@@ -2068,8 +2297,8 @@ section{{margin-bottom:48px}}
       const stars = item.vote_average >= 7 ? '⭐' : item.vote_average >= 5 ? '🌟' : '☆';
       scoreRow.appendChild(makeEl('span', 'score-badge score-vote', stars + ' ' + item.vote_average.toFixed(1)));
     }}
-    if (item.popularity) {{
-      const pop = item.popularity >= 100 ? '🔥🔥' : item.popularity >= 30 ? '🔥' : '📈';
+    if (item.popularity >= 30) {{
+      const pop = item.popularity >= 100 ? '🔥🔥' : '🔥';
       scoreRow.appendChild(makeEl('span', 'score-badge score-trend', pop + ' ' + item.popularity.toFixed(0)));
     }}
     if (scoreRow.children.length) main.appendChild(scoreRow);
@@ -2170,6 +2399,7 @@ section{{margin-bottom:48px}}
 
   function doSearch() {{
     const q       = gv('f-query').value.trim();
+    const actor   = gv('f-actor').value.trim();
     const type    = gv('f-type').value;
     const yr      = gv('f-year').value;
     const genre   = getSelectedGenres();
@@ -2179,6 +2409,7 @@ section{{margin-bottom:48px}}
     const nw      = gv('f-nw').checked;
     const transl  = gv('f-translate').checked;
     const ww      = gv('f-ww').checked;
+    const sd      = gv('f-sd').checked;
     const soon    = gv('f-soon').checked;
 
     gv('loading').style.display = 'block';
@@ -2186,16 +2417,17 @@ section{{margin-bottom:48px}}
     gv('fb-status').textContent = 'Searching…';
     gv('fb-timing').textContent = '';
 
-    const chips = buildChips(q, yr, genre, nw, transl, lang);
+    const chips = buildChips(q, actor, yr, genre, nw, transl, lang);
     renderChips('movie-chips', chips);
     renderChips('tv-chips', chips);
 
     const params = new URLSearchParams({{
-      query: q, year: yr, genre: genre, lang: lang,
+      query: q, actor: actor, year: yr, genre: genre, lang: lang,
       type: type, limit: limit, desc: desc,
       nw: nw ? 'true' : 'false',
       translate: transl ? 'true' : 'false',
       whole_word: ww ? 'true' : 'false',
+      search_desc: sd ? 'true' : 'false',
       soon: soon ? 'true' : 'false'
     }});
 
@@ -2250,8 +2482,9 @@ section{{margin-bottom:48px}}
 
   function clearFilters() {{
     gv('f-query').value = '';
-    gv('f-type').value  = 'all';
-    gv('f-year').value  = '';
+    gv('f-actor').value = '';
+    gv('f-type').value  = 'all';  gv('type-btn').textContent = 'All \u25be'; _updateSSActive('type-panel','all');
+    gv('f-year').value  = '';    gv('year-btn').textContent = 'Any Year \u25be'; _updateSSActive('year-panel','');
     const _cp = gv('genre-panel');
     if (_cp) Array.from(_cp.querySelectorAll('input[type=checkbox]')).forEach(cb => {{ cb.checked = false; }});
     updateGenreBtn();
@@ -2259,18 +2492,20 @@ section{{margin-bottom:48px}}
     if (_lp) Array.from(_lp.querySelectorAll('input[type=checkbox]')).forEach(cb => {{ cb.checked = false; }});
     updateLangBtn();
     gv('f-limit').value = '20';
-    gv('f-desc').value  = '0';
+    gv('f-desc').value  = '{idc}';
     gv('f-nw').checked  = false;
     gv('f-translate').checked = false;
     gv('f-soon').checked = false;
     gv('f-ww').checked  = false;
+    gv('f-sd').checked  = false;
     syncWwState();
+    syncSdState();
     gv('fb-timing').textContent = '';
     doSearch();
   }}
 
   gv('f-soon').addEventListener('change', doSearch);
-  ['f-type','f-year','f-limit','f-desc','f-nw','f-translate','f-ww']
+  ['f-limit','f-desc','f-nw','f-translate','f-ww','f-sd']
     .forEach(id => {{
       const el = gv(id);
       if (el) {{ el.addEventListener('change', scheduleSearch); el.addEventListener('input', scheduleSearch); }}
@@ -2284,11 +2519,88 @@ section{{margin-bottom:48px}}
     cb.disabled              = !hasQuery;
     if (!hasQuery) cb.checked = false;
   }}
+  function syncSdState() {{
+    const hasQuery = gv('f-query').value.trim().length > 0;
+    const lbl = gv('f-sd-label');
+    const cb  = gv('f-sd');
+    lbl.style.opacity        = hasQuery ? '1'    : '0.35';
+    lbl.style.pointerEvents  = hasQuery ? ''     : 'none';
+    cb.disabled              = !hasQuery;
+    if (!hasQuery) cb.checked = false;
+  }}
 
-  gv('f-query').addEventListener('input', syncWwState);
-  gv('f-query').addEventListener('keydown', e => {{ syncWwState(); if (e.key === 'Enter') doSearch(); else scheduleSearch(); }});
+  gv('f-query').addEventListener('input', () => {{ syncWwState(); syncSdState(); }});
+  gv('f-query').addEventListener('keydown', e => {{ syncWwState(); syncSdState(); if (e.key === 'Enter') doSearch(); else scheduleSearch(); }});
+  gv('f-actor').addEventListener('keydown', e => {{ if (e.key === 'Enter') doSearch(); else scheduleSearch(); }});
   gv('btn-search').addEventListener('click', doSearch);
   gv('btn-clear').addEventListener('click', clearFilters);
+
+  // ── Single-select custom dropdowns (Type, Year) ──────────────────────────
+  const _allDDs = ['type-dd','year-dd','genre-dd','lang-dd'];
+
+  function _closeAllPanels(except_id) {{
+    _allDDs.forEach(id => {{
+      if (id === except_id) return;
+      const p = gv(id); if (p) {{ const pn = p.querySelector('.genre-panel'); if (pn) pn.style.display = 'none'; }}
+    }});
+  }}
+
+  function _updateSSActive(panelId, val) {{
+    const p = gv(panelId); if (!p) return;
+    p.querySelectorAll('.ss-item').forEach(el => {{
+      el.classList.toggle('ss-active', el.dataset.val === val);
+    }});
+  }}
+
+  function _buildSingleSelect(ddId, btnId, panelId, hiddenId, items) {{
+    const panel = gv(panelId);
+    const btn   = gv(btnId);
+    const hidden = gv(hiddenId);
+    if (!panel || !btn || !hidden) return;
+    items.forEach(item => {{
+      const el = document.createElement('div');
+      el.className = 'ss-item';
+      el.dataset.val = item.value;
+      el.textContent = item.label;
+      if (item.value === hidden.value) el.classList.add('ss-active');
+      el.addEventListener('click', () => {{
+        hidden.value = item.value;
+        btn.textContent = item.label + ' \u25be';
+        _updateSSActive(panelId, item.value);
+        panel.style.display = 'none';
+        scheduleSearch();
+      }});
+      panel.appendChild(el);
+    }});
+    btn.addEventListener('click', function(e) {{
+      e.stopPropagation();
+      const isOpen = panel.style.display === 'block';
+      _closeAllPanels(isOpen ? null : ddId);
+      panel.style.display = isOpen ? 'none' : 'block';
+    }});
+  }}
+
+  _buildSingleSelect('type-dd','type-btn','type-panel','f-type', [
+    {{value:'all', label:'All'}},
+    {{value:'movie', label:'Movies'}},
+    {{value:'tv', label:'TV Series'}}
+  ]);
+
+  (function() {{
+    const yrs = [{{value:'', label:'Any Year'}}];
+    for (let y = {cur_year}; y >= 1874; y--) yrs.push({{value: String(y), label: String(y)}});
+    _buildSingleSelect('year-dd','year-btn','year-panel','f-year', yrs);
+  }})();
+
+  document.addEventListener('click', function(e) {{
+    _allDDs.forEach(id => {{
+      const dd = gv(id);
+      if (dd && !dd.contains(e.target)) {{
+        const p = dd.querySelector('.genre-panel');
+        if (p) p.style.display = 'none';
+      }}
+    }});
+  }});
 
   // ── Genre custom dropdown ──────────────────────────────────────────────────
   function getSelectedGenres() {{
@@ -2312,15 +2624,8 @@ section{{margin-bottom:48px}}
     e.stopPropagation();
     const panel = gv('genre-panel');
     const isOpen = panel.style.display === 'block';
+    _closeAllPanels(isOpen ? null : 'genre-dd');
     panel.style.display = isOpen ? 'none' : 'block';
-  }});
-
-  document.addEventListener('click', function(e) {{
-    const dd = gv('genre-dd');
-    if (dd && !dd.contains(e.target)) {{
-      const panel = gv('genre-panel');
-      if (panel) panel.style.display = 'none';
-    }}
   }});
 
   // Fetch genres from server and build checkbox list
@@ -2352,52 +2657,68 @@ section{{margin-bottom:48px}}
   function getSelectedLangs() {{
     const panel = gv('lang-panel');
     if (!panel) return '';
+    const seen = new Set();
     return Array.from(panel.querySelectorAll('input[type=checkbox]:checked'))
-      .map(cb => cb.value).join(',');
+      .map(cb => cb.value).filter(v => {{ if (seen.has(v)) return false; seen.add(v); return true; }})
+      .join(',');
   }}
 
   function updateLangBtn() {{
     const panel = gv('lang-panel');
     const btn   = gv('lang-btn');
     if (!btn) return;
-    const checked = panel ? Array.from(panel.querySelectorAll('input[type=checkbox]:checked')) : [];
-    if (checked.length === 0)      btn.textContent = 'Any Language \u25be';
-    else if (checked.length === 1) btn.textContent = checked[0].value + ' \u25be';
-    else                           btn.textContent = checked.length + ' languages \u25be';
+    const all = panel ? Array.from(panel.querySelectorAll('input[type=checkbox]:checked')) : [];
+    const unique = [...new Set(all.map(cb => cb.value))];
+    if (unique.length === 0)      btn.textContent = 'Any Language \u25be';
+    else if (unique.length === 1) btn.textContent = unique[0] + ' \u25be';
+    else                          btn.textContent = unique.length + ' languages \u25be';
   }}
 
   gv('lang-btn').addEventListener('click', function(e) {{
     e.stopPropagation();
     const panel = gv('lang-panel');
     const isOpen = panel.style.display === 'block';
+    _closeAllPanels(isOpen ? null : 'lang-dd');
     panel.style.display = isOpen ? 'none' : 'block';
   }});
 
-  document.addEventListener('click', function(e) {{
-    const dd = gv('lang-dd');
-    if (dd && !dd.contains(e.target)) {{
-      const panel = gv('lang-panel');
-      if (panel) panel.style.display = 'none';
-    }}
-  }});
+  function _makeLangCb(panel, name) {{
+    const lbl = document.createElement('label');
+    const cb  = document.createElement('input');
+    cb.type  = 'checkbox';
+    cb.value = name;
+    cb.addEventListener('change', () => {{
+      // sync all checkboxes with same language name
+      Array.from(panel.querySelectorAll('input[type=checkbox]'))
+        .filter(x => x.value === name && x !== cb)
+        .forEach(x => {{ x.checked = cb.checked; }});
+      updateLangBtn(); scheduleSearch();
+    }});
+    lbl.appendChild(cb);
+    lbl.appendChild(document.createTextNode(' ' + name));
+    panel.appendChild(lbl);
+  }}
 
   (function loadLanguages() {{
     fetch('/api/languages')
       .then(r => r.json())
-      .then(langs => {{
+      .then(data => {{
         const panel = gv('lang-panel');
         if (!panel) return;
-        panel.innerHTML = '';
-        langs.forEach(l => {{
-          const lbl = document.createElement('label');
-          const cb  = document.createElement('input');
-          cb.type  = 'checkbox';
-          cb.value = l;
-          cb.addEventListener('change', () => {{ updateLangBtn(); scheduleSearch(); }});
-          lbl.appendChild(cb);
-          lbl.appendChild(document.createTextNode(' ' + l));
-          panel.appendChild(lbl);
-        }});
+        while (panel.firstChild) panel.removeChild(panel.firstChild);
+        const recent = data.recent || [];
+        const all    = data.all    || [];
+        if (recent.length) {{
+          const hdr = document.createElement('div');
+          hdr.className = 'lang-section-hdr';
+          hdr.textContent = 'Recent';
+          panel.appendChild(hdr);
+          recent.forEach(l => _makeLangCb(panel, l));
+          const sep = document.createElement('hr');
+          sep.className = 'lang-section-sep';
+          panel.appendChild(sep);
+        }}
+        all.forEach(l => _makeLangCb(panel, l));
         updateLangBtn();
       }})
       .catch(() => {{}});
@@ -2471,25 +2792,44 @@ def run_interactive_server(init_args, watched_set=None, open_browser_event=None)
                 nw      = p('nw') == 'true'
                 transl  = p('translate') == 'true'
                 ww      = bool(q) and p('whole_word') == 'true'
+                sd      = bool(q) and p('search_desc') == 'true'
                 lang_str = p('lang')
                 lang_filter = [l.strip() for l in lang_str.split(',') if l.strip()] if lang_str else None
                 show_soon = p('soon') == 'true'
+                actor_q = p('actor')
                 result  = run_search(
                     query=q, year=yr, genre_name=gn, limit=lim,
                     movies_only=mo, series_only=so, not_watched=nw,
                     translate=transl, desc_length=desc, watched_set=watched_set,
                     lang_filter=lang_filter, whole_word=ww, show_soon=show_soon,
+                    search_desc=sd, actor=actor_q,
                 )
                 t = result['timing']
-                _should_log = t.get('tmdb', 1) != 0.0 or nw  # log TMDB fetches OR unwatched searches
-                if _should_log:
-                    _tr_info  = f"translate={t.get('translate',0)}s ({t.get('tr_cached',0)}⚡/{t.get('tr_new',0)}🌐)"
-                    _nw_flag  = " nw=true" if nw else ""
-                    _nw_time  = f" nw={t.get('nw',0)}s" if nw else ""
-                    _cache_hit = "⚡cache " if t.get('tmdb') == 0.0 else ""
-                    print(f"[search] {_cache_hit}q={q!r} yr={yr} genre={gn} type={p('type')}{_nw_flag} "
-                          f"→ {len(result['movies'])}m {len(result['tvs'])}tv "
-                          f"tmdb={t.get('tmdb',0)}s {_tr_info}{_nw_time} total={t.get('total',0)}s")
+                _parts = []
+                if t.get('tmdb') == 0.0: _parts.append("⚡cache")
+                if q: _parts.append(f"q={q!r}")
+                if actor_q: _parts.append(f"actor={actor_q!r}")
+                if yr: _parts.append(f"yr={yr}")
+                if gn: _parts.append(f"genre={gn}")
+                _typ = p('type')
+                if _typ and _typ != 'all': _parts.append(f"type={_typ}")
+                if lang_filter: _parts.append(f"lang={','.join(lang_filter)}")
+                _parts.append(f"limit={lim}")
+                _parts.append(f"desc={desc}")
+                if ww: _parts.append("ww")
+                if sd: _parts.append("sd")
+                if nw: _parts.append("nw")
+                if show_soon: _parts.append("soon")
+                if transl: _parts.append("he")
+                _timing = []
+                _timing.append(f"tmdb={t.get('tmdb',0)}s")
+                if transl: _timing.append(f"translate={t.get('translate',0)}s ({t.get('tr_cached',0)}⚡/{t.get('tr_new',0)}🌐)")
+                if nw: _timing.append(f"nw={t.get('nw',0)}s")
+                _timing.append(f"total={t.get('total',0)}s")
+                _C = Colors
+                print(f"[search] {' '.join(_parts)} → {_C.GREEN}{len(result['movies'])}m {len(result['tvs'])}tv{_C.END} {_C.CYAN}{' '.join(_timing)}{_C.END}")
+                if lang_filter:
+                    _save_recent_langs(lang_filter)
                 body = _json.dumps(result, ensure_ascii=False).encode('utf-8')
                 self._send(200, 'application/json; charset=utf-8', body)
             elif parsed.path == '/api/genres':
@@ -2500,11 +2840,13 @@ def run_interactive_server(init_args, watched_set=None, open_browser_event=None)
                 self._send(200, 'application/json; charset=utf-8', body)
             elif parsed.path == '/api/languages':
                 langs = sorted(_LANG_NAMES.values())
-                body = _json.dumps(langs, ensure_ascii=False).encode('utf-8')
+                recent = [r for r in _load_recent_langs() if r in langs]
+                body = _json.dumps({"all": langs, "recent": recent}, ensure_ascii=False).encode('utf-8')
                 self._send(200, 'application/json; charset=utf-8', body)
             elif parsed.path == '/api/clear-cache':
                 import shutil
                 sc = len(_search_cache);  _search_cache.clear()
+                _tmdb_year_cache.clear()
                 tc = len(_trailer_cache); _trailer_cache.clear()
                 ic = len(_image_cache);   _image_cache.clear()
                 # wipe disk caches
@@ -2596,19 +2938,40 @@ def run_interactive_server(init_args, watched_set=None, open_browser_event=None)
 
     class ThreadingServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         daemon_threads = True
+        allow_reuse_address = True
 
-    # Pick a free port
-    with socket.socket() as s:
-        s.bind(('0.0.0.0', 0))
-        port = s.getsockname()[1]
+    # Fixed port — kill previous instance if still running
+    port = 58923
+    try:
+        import signal
+        with socket.socket() as _probe:
+            _probe.settimeout(1)
+            if _probe.connect_ex(('127.0.0.1', port)) == 0:
+                # Port in use — find and kill the process
+                import subprocess as _sp
+                _pid = _sp.check_output(
+                    f"lsof -ti tcp:{port}", shell=True, text=True
+                ).strip()
+                if _pid:
+                    for p in _pid.split('\n'):
+                        os.kill(int(p), signal.SIGKILL)
+                    import time as _kwait
+                    _kwait.sleep(0.3)
+    except Exception:
+        pass
 
     srv = ThreadingServer(('0.0.0.0', port), Handler)
     url = f'http://127.0.0.1:{port}/'
     print(f"\n{Colors.GREEN}Interactive server: {url}{Colors.END}")
-    print(f"{Colors.CYAN}Ctrl+C to stop{Colors.END}\n")
+    print(f"{Colors.CYAN}Ctrl+C to stop{Colors.END}")
+    print(f"{Colors.GRAY}Started at: {_perf_time.strftime('%Y-%m-%d %H:%M:%S', _perf_time.localtime())}{Colors.END}\n")
+    
     if open_browser_event is not None:
         open_browser_event.wait()  # wait for Trakt auth/sync before opening browser
+    
     webbrowser.open(url)
+    print(f"{Colors.GRAY}load web at: {_perf_time.strftime('%Y-%m-%d %H:%M:%S', _perf_time.localtime())}{Colors.END}\n")
+
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

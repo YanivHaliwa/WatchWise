@@ -9,7 +9,7 @@ import subprocess
 
 DEBUG = False
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 GET_TRAKT_SCRIPT = os.path.join(SCRIPT_DIR, "getTrakt.sh")
 _WATCHED_CACHE_FILE = os.path.join(SCRIPT_DIR, ".watched_cache.json")
 _CACHE_TTL = 30 * 24 * 3600  # 30 days
@@ -19,8 +19,14 @@ def _load_watched_cache() -> set:
     try:
         with open(_WATCHED_CACHE_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        if isinstance(data, dict) and 'titles' in data and 'ts' in data:
-            if time.time() - data['ts'] < _CACHE_TTL:
+        if isinstance(data, dict) and 'titles' in data:
+            cache_ts = data.get('ts')
+            if cache_ts is None and data.get('updated'):
+                try:
+                    cache_ts = time.mktime(time.strptime(data['updated'], "%Y-%m-%dT%H:%M:%S.%f"))
+                except ValueError:
+                    cache_ts = time.mktime(time.strptime(data['updated'], "%Y-%m-%dT%H:%M:%S"))
+            if cache_ts is not None and time.time() - float(cache_ts) < _CACHE_TTL:
                 return set(data['titles'])
     except Exception:
         pass
@@ -29,8 +35,13 @@ def _load_watched_cache() -> set:
 def _save_watched_cache(titles: set) -> None:
     """Persist watched titles to disk cache with current timestamp."""
     try:
+        now_ts = time.time()
         with open(_WATCHED_CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'ts': time.time(), 'titles': list(titles)}, f, ensure_ascii=False)
+            json.dump({
+                'ts': now_ts,
+                'updated': time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now_ts)),
+                'titles': list(titles),
+            }, f, ensure_ascii=False)
     except Exception:
         pass
 
