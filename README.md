@@ -8,26 +8,29 @@ A CLI tool to search for movies and TV shows with optional filtering based on yo
 ## Features
 
 - 🔍 **Search Movies and TV Shows**: Find content by title or keywords
+- 🎭 **Actor Search**: Search by actor/actress name — shows their full filmography, combinable with all other filters
 - 🏠 **Browse Latest**: No query needed — launches with the latest releases by default
 - 📺 **Detailed Information**: View release dates, genres, descriptions, and scores
 - 🎬 **Filter by Type**: Movies only or TV shows only
 - ⌛ **Filter by Year**: Find content from a specific release year
 - 🎭 **Filter by Genre**: Browse or search by one or multiple genres (query optional)
-- 🌍 **Filter by Language**: Show only content in specific original languages
+- 🌍 **Filter by Language**: Show only content in specific original languages with recent languages remembered across sessions
 - ✅ **Watch History Integration**: Filter out content you've already watched
 - 🔜 **Coming Soon Control**: Toggle to show or hide upcoming unreleased titles (hidden by default)
+- 🔎 **Exact Word Match**: Toggle to match only whole words in title search
 - 🔎 **Description Search**: Find media that matches keywords in descriptions
-- ⭐ **Rating & Trending Scores**: Each card shows IMDb-style vote average and TMDB popularity score
+- ⭐ **Rating & Trending Scores**: Each card shows IMDb-style vote average and trending score (only when popularity is significant)
 - 🗂️ **Sort Bar**: Sort results by Latest / Top Rated / Trending / Name / Language — click again to reverse
 - 🏷️ **Genre & Language Badges**: Visual display of genres and original language per result
 - 🌐 **Hebrew Translation**: Translate titles, descriptions, and genres to Hebrew via `deep_translator` with persistent disk cache
-- ⚡ **Smart Caching**: Four cache layers — persistent translation, trailer, and image caches on disk + in-memory TMDB search cache per session
+- ⚡ **Smart Caching**: Multi-layer caching — persistent translation, trailer, image, and recent languages on disk + in-memory TMDB search, actor credits, and raw API result caches
 - 🖥️ **Web View** (`-w`): Display results as a static styled dark-theme HTML page opened in Firefox
-- 🚀 **Interactive Mode** (`-i`): Full in-browser live server — no `-w` needed, `-i` implies it
+- 🚀 **Interactive Mode** (`-i`): Full in-browser live server on fixed port 58923 — no `-w` needed, `-i` implies it
 - 🖼️ **Poster Images**: Movie/show cover art displayed inside each result card
 - 🎬 **YouTube Trailer Modal**: Watch trailers without leaving the page — fullscreen overlay, ESC or click-outside to close
 - 🛡️ **1 GB Cache Size Guard**: Disk caches auto-cleared if combined size exceeds 1 GB
 - 📊 **Relevance Scoring**: Results ranked by how closely they match your query
+- ⚡ **Parallel TMDB Fetching**: All search result pages fetched in parallel for faster results
 
 
 ## Screenshots
@@ -173,12 +176,15 @@ The interactive server opens in Firefox and provides a live filter panel that re
 | Control | Description |
 |---------|-------------|
 | **Query** | Title or keyword search |
-| **Type** | All / Movies / TV Series |
-| **Year** | Filter by release year |
+| **Actor** | Search by actor/actress name (uses TMDB person search + combined credits) |
+| **Exact** | Match whole words only in title search |
+| **Desc** | Also search in descriptions (title OR description) |
+| **Type** | All / Movies / TV Series (custom dropdown) |
+| **Year** | Filter by release year (custom dropdown) |
 | **Genre** | Multi-select genre dropdown |
-| **Language** | Multi-select language dropdown |
+| **Language** | Multi-select language dropdown with recent languages section |
 | **Limit** | Max results per section (default 20) |
-| **Desc chars** | Characters of description to show |
+| **Desc chars** | Characters of description to show (default 1000) |
 | **Unwatched** | Hide titles you've already watched |
 | **Hebrew** | Translate results to Hebrew |
 | **Soon** | Show upcoming unreleased titles (off by default — limit is always filled from released titles) |
@@ -253,7 +259,7 @@ The application uses environment variables for configuration:
 
 ## Caching
 
-WatchWise uses four cache layers to keep things fast:
+WatchWise uses multiple cache layers to keep things fast:
 
 ### Translation Cache (`.trans_cache.json`)
 
@@ -290,13 +296,30 @@ python watched.py -r
 
 ### TMDB Search Cache (In-Memory)
 
-- Keyed by query, year, genre, limit, and description length
+- Keyed by all active filters (query, actor, year, genre, limit, description length, language, whole word, search desc, soon)
 - Repeat searches with the same parameters hit the cache instantly
 - Especially useful in interactive mode where filters change frequently
 
+### TMDB Raw API Cache (In-Memory)
+
+- Caches raw TMDB API page results keyed by (query, year, media type)
+- Avoids re-fetching all pages when only post-processing filters change
+- Pages fetched in parallel using ThreadPoolExecutor for speed
+
+### Actor Credits Cache (In-Memory)
+
+- Caches actor filmography keyed by actor name
+- Uses TMDB `/search/person` → `/person/{id}/combined_credits`
+- Returns both movie and TV credits in a single cached lookup
+
+### Recent Languages (`.recent_langs.json`)
+
+- Tracks last 5 languages selected in the language dropdown
+- Persists across sessions — recent languages appear at the top for quick access
+
 ### Cache Size Limit
 
-All four disk caches share a **1 GB combined size limit**. When reached, all disk caches are auto-cleared. Manual clear:
+All disk caches share a **1 GB combined size limit**. When reached, all disk caches are auto-cleared. Manual clear:
 
 ```bash
 python WatchSearch.py --clear-cache
